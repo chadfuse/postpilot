@@ -292,7 +292,7 @@ elif page == "Videos":
                 if result and result.get("success"):
                     st.success(result.get("message", "Download task queued"))
         with col_btn2:
-            if st.button("Clear All Pending", type="secondary"):
+            if st.button("Clear All Pending", key="clear_dl", type="secondary"):
                 if st.session_state.get("confirm_clear_dl"):
                     result = api_request("/videos/pending-download", "DELETE")
                     if result and result.get("success"):
@@ -335,7 +335,7 @@ elif page == "Videos":
                 if result and result.get("success"):
                     st.success(result.get("message", "Posting task queued"))
         with col_btn2:
-            if st.button("Clear All Pending", type="secondary"):
+            if st.button("Clear All Pending", key="clear_post", type="secondary"):
                 if st.session_state.get("confirm_clear_post"):
                     result = api_request("/videos/pending-post", "DELETE")
                     if result and result.get("success"):
