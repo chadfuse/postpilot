@@ -146,6 +146,13 @@ class FacebookPoster:
                     # Update database with Facebook post ID
                     if self.database.update_video_posted(tiktok_id, result['facebook_post_id']):
                         self.database.log_info('poster', f'Successfully posted video {tiktok_id} to Facebook')
+                        # Delete local video file to free disk space (DB record kept for dedup)
+                        try:
+                            if video_path and os.path.exists(video_path):
+                                os.remove(video_path)
+                                self.database.log_info('poster', f'Deleted local file after posting: {video_path}')
+                        except Exception as del_err:
+                            self.database.log_warning('poster', f'Could not delete file {video_path}: {del_err}')
                         return {
                             'success': True,
                             'tiktok_id': tiktok_id,
