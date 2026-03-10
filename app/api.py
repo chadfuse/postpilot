@@ -208,7 +208,7 @@ async def get_videos(
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/videos/pending-download")
-async def get_pending_downloads(limit: int = Query(default=50, le=100)):
+async def get_pending_downloads(limit: int = Query(default=50, le=500)):
     """Get videos pending download"""
     try:
         videos = database.get_pending_downloads(limit)
@@ -221,7 +221,7 @@ async def get_pending_downloads(limit: int = Query(default=50, le=100)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/videos/pending-post")
-async def get_pending_posts(limit: int = Query(default=15, le=50)):
+async def get_pending_posts(limit: int = Query(default=15, le=500)):
     """Get videos pending posting"""
     try:
         videos = database.get_pending_posts(limit)
