@@ -290,6 +290,49 @@ class Database:
             self.log_error('database', f'Failed to get pending posts: {str(e)}')
             return []
     
+    def clear_pending_downloads(self) -> int:
+        """Delete all videos that are not yet downloaded"""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('DELETE FROM videos WHERE downloaded = FALSE')
+                deleted = cursor.rowcount
+                conn.commit()
+                self.log_info('database', f'Cleared {deleted} pending download videos')
+                return deleted
+        except sqlite3.Error as e:
+            self.log_error('database', f'Failed to clear pending downloads: {str(e)}')
+            return 0
+    
+    def clear_pending_posts(self) -> int:
+        """Delete all videos that are downloaded but not yet posted"""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('DELETE FROM videos WHERE downloaded = TRUE AND posted = FALSE')
+                deleted = cursor.rowcount
+                conn.commit()
+                self.log_info('database', f'Cleared {deleted} pending post videos')
+                return deleted
+        except sqlite3.Error as e:
+            self.log_error('database', f'Failed to clear pending posts: {str(e)}')
+            return 0
+    
+    def delete_video(self, tiktok_id: str) -> bool:
+        """Delete a specific video by tiktok_id"""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('DELETE FROM videos WHERE tiktok_id = ?', (tiktok_id,))
+                deleted = cursor.rowcount > 0
+                conn.commit()
+                if deleted:
+                    self.log_info('database', f'Deleted video {tiktok_id}')
+                return deleted
+        except sqlite3.Error as e:
+            self.log_error('database', f'Failed to delete video {tiktok_id}: {str(e)}')
+            return False
+    
     def get_system_stats(self) -> Dict:
         """Get system statistics"""
         try:

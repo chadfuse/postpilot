@@ -233,6 +233,50 @@ async def get_pending_posts(limit: int = Query(default=15, le=50)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# Video Management
+@app.delete("/videos/pending-download")
+async def clear_pending_downloads():
+    """Delete all videos pending download"""
+    try:
+        deleted = database.clear_pending_downloads()
+        return {
+            "success": True,
+            "deleted": deleted,
+            "message": f"Cleared {deleted} videos pending download"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/videos/pending-post")
+async def clear_pending_posts():
+    """Delete all videos pending posting"""
+    try:
+        deleted = database.clear_pending_posts()
+        return {
+            "success": True,
+            "deleted": deleted,
+            "message": f"Cleared {deleted} videos pending posting"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/videos/{tiktok_id}")
+async def delete_video(tiktok_id: str):
+    """Delete a specific video by TikTok ID"""
+    try:
+        success = database.delete_video(tiktok_id)
+        if success:
+            return {
+                "success": True,
+                "message": f"Video {tiktok_id} deleted"
+            }
+        else:
+            raise HTTPException(status_code=404, detail="Video not found")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 # Task Management
 @app.post("/tasks/scrape-keyword/{keyword}")
 async def scrape_keyword(keyword: str, background_tasks: BackgroundTasks):
@@ -387,6 +431,41 @@ async def get_system_stats():
             "database": stats,
             "config": config,
             "queue": queue_info,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/tasks/status")
+async def get_task_status():
+    """Get current task queue status and ETAs"""
+    try:
+        from rq.job import Job
+        status = {}
+        for name, q in [('scraper', scraper_queue), ('downloader', downloader_queue), ('poster', poster_queue), ('cleanup', cleanup_queue)]:
+            if not q:
+                continue
+            pending = []
+            for job_id in q.get_job_ids():
+                try:
+                    job = Job.fetch(job_id, connection=redis_conn)
+                    pending.append({
+                        'id': job.id[:8],
+                        'func': job.func_name,
+                        'created_at': job.created_at.isoformat() if job.created_at else None,
+                        'status': job.get_status(),
+                        'timeout': job.timeout
+                    })
+                except:
+                    continue
+            status[name] = {
+                'pending': len(q),
+                'failed': q.failed_job_registry.count,
+                'jobs': pending[:5]  # show up to 5 jobs
+            }
+        return {
+            "success": True,
+            "queues": status,
             "timestamp": datetime.now().isoformat()
         }
     except Exception as e:

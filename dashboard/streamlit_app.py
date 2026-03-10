@@ -258,7 +258,7 @@ elif page == "Videos":
     st.title("📹 Videos Management")
     
     # Tabs for different video views
-    tab1, tab2, tab3 = st.tabs(["Pending Downloads", "Pending Posts", "All Videos"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Pending Downloads", "Pending Posts", "All Videos", "Task Status"])
     
     with tab1:
         st.subheader("Videos Pending Download")
@@ -285,10 +285,23 @@ elif page == "Videos":
             else:
                 st.info("No videos pending download")
         
-        if st.button("Download All Pending", type="primary"):
-            result = api_request("/tasks/download-pending", "POST")
-            if result and result.get("success"):
-                st.success(result.get("message", "Download task queued"))
+        col_btn1, col_btn2 = st.columns(2)
+        with col_btn1:
+            if st.button("Download All Pending", type="primary"):
+                result = api_request("/tasks/download-pending", "POST")
+                if result and result.get("success"):
+                    st.success(result.get("message", "Download task queued"))
+        with col_btn2:
+            if st.button("Clear All Pending", type="secondary"):
+                if st.session_state.get("confirm_clear_dl"):
+                    result = api_request("/videos/pending-download", "DELETE")
+                    if result and result.get("success"):
+                        st.success(result.get("message", "Cleared pending downloads"))
+                        st.session_state["confirm_clear_dl"] = False
+                        st.rerun()
+                else:
+                    st.session_state["confirm_clear_dl"] = True
+                    st.warning("Click again to confirm clearing all pending downloads")
     
     with tab2:
         st.subheader("Videos Pending Posting")
@@ -315,10 +328,23 @@ elif page == "Videos":
             else:
                 st.info("No videos pending posting")
         
-        if st.button("Post All Pending", type="primary"):
-            result = api_request("/tasks/post-pending", "POST")
-            if result and result.get("success"):
-                st.success(result.get("message", "Posting task queued"))
+        col_btn1, col_btn2 = st.columns(2)
+        with col_btn1:
+            if st.button("Post All Pending", type="primary"):
+                result = api_request("/tasks/post-pending", "POST")
+                if result and result.get("success"):
+                    st.success(result.get("message", "Posting task queued"))
+        with col_btn2:
+            if st.button("Clear All Pending", type="secondary"):
+                if st.session_state.get("confirm_clear_post"):
+                    result = api_request("/videos/pending-post", "DELETE")
+                    if result and result.get("success"):
+                        st.success(result.get("message", "Cleared pending posts"))
+                        st.session_state["confirm_clear_post"] = False
+                        st.rerun()
+                else:
+                    st.session_state["confirm_clear_post"] = True
+                    st.warning("Click again to confirm clearing all pending posts")
     
     with tab3:
         st.subheader("All Videos")
@@ -351,9 +377,52 @@ elif page == "Videos":
                         "Created": v.get("created_at", "")[:16],
                     })
                 import pandas as pd
-                st.dataframe(pd.DataFrame(rows), use_container_width=True)
+                df = pd.DataFrame(rows)
+                st.dataframe(df, use_container_width=True)
+                
+                # Individual delete buttons
+                st.subheader("Delete Individual Videos")
+                selected_id = st.selectbox("Select video to delete:", [""] + [v["tiktok_id"] for v in videos], key="delete_select")
+                if selected_id:
+                    if st.button("Delete Selected Video", type="secondary"):
+                        result = api_request(f"/videos/{selected_id}", "DELETE")
+                        if result and result.get("success"):
+                            st.success(result.get("message", "Video deleted"))
+                            st.rerun()
+                        else:
+                            st.error("Failed to delete video")
             else:
                 st.info("No videos match the selected filters")
+    
+    with tab4:
+        st.subheader("Task Queue Status")
+        status = api_request("/tasks/status")
+        if status and status.get("success"):
+            for qname, qinfo in status.get("queues", {}).items():
+                with st.expander(f"📋 {qname.title()} Queue"):
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Pending", qinfo.get("pending", 0))
+                    with col2:
+                        st.metric("Failed", qinfo.get("failed", 0))
+                    with col3:
+                        st.metric("Jobs Shown", len(qinfo.get("jobs", [])))
+                    
+                    jobs = qinfo.get("jobs", [])
+                    if jobs:
+                        for job in jobs:
+                            with st.container():
+                                cols = st.columns([2, 2, 2, 2])
+                                cols[0].write(f"**ID:** `{job['id']}`")
+                                cols[1].write(f"**Func:** {job['func'].replace('_', ' ').title()}")
+                                cols[2].write(f"**Status:** {job['status'].title()}")
+                                if job.get('created_at'):
+                                    created = datetime.fromisoformat(job['created_at'])
+                                    cols[3].write(f"**Age:** {(datetime.now() - created).total_seconds():.0f}s")
+                    else:
+                        st.info("No jobs in queue")
+        else:
+            st.error("Failed to load task status")
 
 elif page == "Tasks":
     st.title("⚙️ Task Management")
