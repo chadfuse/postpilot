@@ -426,53 +426,85 @@ elif page == "Videos":
 
 elif page == "Tasks":
     st.title("⚙️ Task Management")
-    
+
+    # --- Live stats banner ---
+    stats      = api_request("/stats")
+    dl_data    = api_request("/videos/pending-download?limit=200")
+    post_data  = api_request("/videos/pending-post?limit=200")
+
+    db_overall    = stats.get("database", {}).get("overall", {}) if stats else {}
+    pending_dl    = len(dl_data.get("videos", []))   if dl_data   else 0
+    pending_post  = len(post_data.get("videos", [])) if post_data else 0
+    posted_today  = stats.get("database", {}).get("today", {}).get("posted", 0) if stats else 0
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total Scraped",    db_overall.get("total_videos", 0))
+    c2.metric("Pending Download", pending_dl)
+    c3.metric("Pending Post",     pending_post)
+    c4.metric("Posted Today",     posted_today)
+
+    st.divider()
     col1, col2 = st.columns(2)
-    
+
     with col1:
-        st.subheader("Manual Tasks")
-        
-        if st.button("🔍 Scrape All Keywords", type="primary"):
+        st.subheader("▶️ Manual Tasks")
+
+        if st.button("🔍 Scrape All Keywords", type="primary", use_container_width=True):
             result = api_request("/tasks/scrape-all", "POST")
             if result and result.get("success"):
                 st.success(result.get("message", "Scraping task queued"))
             else:
                 st.error("Failed to queue scraping task")
-        
-        if st.button("⬇️ Download Pending Videos"):
+
+        if st.button("⬇️ Download Pending Videos", use_container_width=True):
             result = api_request("/tasks/download-pending", "POST")
             if result and result.get("success"):
                 st.success(result.get("message", "Download task queued"))
             else:
                 st.error("Failed to queue download task")
-        
-        if st.button("📤 Post Pending Videos"):
+
+        if st.button("📤 Post Pending Videos", use_container_width=True):
             result = api_request("/tasks/post-pending", "POST")
             if result and result.get("success"):
                 st.success(result.get("message", "Posting task queued"))
             else:
                 st.error("Failed to queue posting task")
-        
-        if st.button("🧹 Cleanup Old Files"):
+
+        if st.button("🧹 Cleanup Old Files", use_container_width=True):
             result = api_request("/tasks/cleanup", "POST")
             if result and result.get("success"):
                 st.success(result.get("message", "Cleanup task queued"))
             else:
                 st.error("Failed to queue cleanup task")
-    
+
     with col2:
-        st.subheader("Task Queue Status")
-        
-        stats = api_request("/stats")
-        if stats and stats.get("success") and stats.get("queue"):
-            queue_data = stats.get("queue", {})
-            
-            st.metric("Pending Jobs", queue_data.get("pending_jobs", 0))
-            st.metric("Failed Jobs", queue_data.get("failed_jobs", 0))
-            st.metric("Scheduled Jobs", queue_data.get("scheduled_jobs", 0))
-            st.metric("Started Jobs", queue_data.get("started_jobs", 0))
+        st.subheader("📊 Queue Status")
+
+        task_status = api_request("/tasks/status")
+        if task_status and task_status.get("success"):
+            queues = task_status.get("queues", {})
+            total_pending = sum(q.get("pending", 0) for q in queues.values())
+            total_failed  = sum(q.get("failed", 0) for q in queues.values())
+
+            mc1, mc2 = st.columns(2)
+            mc1.metric("Jobs in Queue", total_pending)
+            mc2.metric("Failed Jobs", total_failed)
+
+            for qname, qinfo in queues.items():
+                icon = {"scraper": "🔍", "downloader": "⬇️", "poster": "📤", "cleanup": "🧹"}.get(qname, "📋")
+                p = qinfo.get("pending", 0)
+                f = qinfo.get("failed", 0)
+                status_str = f"{'🟢' if p == 0 and f == 0 else '🟡' if p > 0 else '🔴'}  pending: {p}  |  failed: {f}"
+                st.write(f"{icon} **{qname.title()}** — {status_str}")
+
+                for job in qinfo.get("jobs", []):
+                    age = ""
+                    if job.get("created_at"):
+                        secs = (datetime.now() - datetime.fromisoformat(job["created_at"])).total_seconds()
+                        age = f"  ({int(secs)}s ago)"
+                    st.caption(f"  `{job['id']}` · {job['func'].split('.')[-1]} · {job['status']}{age}")
         else:
-            st.info("Queue status not available")
+            st.warning("Queue status unavailable — Redis may be disconnected")
 
 elif page == "Logs":
     st.title("📋 System Logs")
