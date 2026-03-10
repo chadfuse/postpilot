@@ -3,22 +3,18 @@ services:
   - type: web
     name: postpilot-api
     env: python
-    plan: starter
+    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app.api:app --host 0.0.0.0 --port $PORT
-    disk:
-      name: postpilot-data
-      mountPath: /var/data
-      sizeGB: 10
     envVars:
       - key: PYTHON_VERSION
         value: "3.11"
       - key: DATABASE_PATH
-        value: /var/data/app.db
+        value: app/database.db
       - key: DOWNLOAD_PATH
-        value: /var/data/videos
+        value: videos
       - key: LOG_PATH
-        value: /var/data/logs
+        value: logs
       - key: REDIS_URL
         fromService:
           name: postpilot-redis
@@ -31,41 +27,33 @@ services:
   - type: web
     name: postpilot-dashboard
     env: python
-    plan: starter
+    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: streamlit run dashboard/streamlit_app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true
     envVars:
       - key: PYTHON_VERSION
         value: "3.11"
       - key: API_BASE_URL
-        fromService:
-          name: postpilot-api
-          type: web
-          property: host
-          # Note: set this manually as https://<postpilot-api>.onrender.com after first deploy
+        value: https://postpilot-api.onrender.com
 
   # Worker Service - RQ Background Task Worker
   - type: worker
     name: postpilot-worker
     env: python
-    plan: starter
+    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: python run_worker.py
-    disk:
-      name: postpilot-worker-data
-      mountPath: /var/data
-      sizeGB: 10
     envVars:
       - key: PYTHON_VERSION
         value: "3.11"
       - key: WORKER_MODE
         value: worker
       - key: DATABASE_PATH
-        value: /var/data/app.db
+        value: app/database.db
       - key: DOWNLOAD_PATH
-        value: /var/data/videos
+        value: videos
       - key: LOG_PATH
-        value: /var/data/logs
+        value: logs
       - key: REDIS_URL
         fromService:
           name: postpilot-redis
@@ -78,14 +66,14 @@ services:
   - type: worker
     name: postpilot-scheduler
     env: python
-    plan: starter
+    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: python run_scheduler.py
     envVars:
       - key: PYTHON_VERSION
         value: "3.11"
       - key: DATABASE_PATH
-        value: /var/data/app.db
+        value: app/database.db
       - key: REDIS_URL
         fromService:
           name: postpilot-redis
