@@ -1,4 +1,5 @@
 import os
+import random
 import redis
 import json
 import time
@@ -174,7 +175,9 @@ class SchedulerService:
         """Schedule scraping tasks based on configuration"""
         try:
             config = self._get_config()
-            scrape_interval = config.get('SCRAPE_INTERVAL', 30)  # minutes
+            min_scrape = config.get('MIN_SCRAPE_INTERVAL', config.get('SCRAPE_INTERVAL', 20))
+            max_scrape = config.get('MAX_SCRAPE_INTERVAL', min_scrape)
+            scrape_interval = random.randint(min(min_scrape, max_scrape), max(min_scrape, max_scrape))
             
             # Check if we should run scraping now
             last_scrape = self._get_last_run_time('scraping')
@@ -233,14 +236,18 @@ class SchedulerService:
         """Schedule posting tasks based on daily limits"""
         try:
             config = self._get_config()
+            min_posts = config.get('MIN_POSTS_PER_DAY', config.get('MAX_POSTS_PER_DAY', 10))
             max_posts_per_day = config.get('MAX_POSTS_PER_DAY', 15)
-            post_interval = config.get('POST_INTERVAL', 60)  # minutes
+            daily_limit = random.randint(min(min_posts, max_posts_per_day), max(min_posts, max_posts_per_day))
+            min_post_iv = config.get('MIN_POST_INTERVAL', config.get('POST_INTERVAL', 30))
+            max_post_iv = config.get('MAX_POST_INTERVAL', min_post_iv)
+            post_interval = random.randint(min(min_post_iv, max_post_iv), max(min_post_iv, max_post_iv))
             
             # Check daily post count
             stats = self.database.get_system_stats()
             posts_today = stats['today']['posted']
             
-            if posts_today >= max_posts_per_day:
+            if posts_today >= daily_limit:
                 return
             
             # Check if we should post now
@@ -255,9 +262,10 @@ class SchedulerService:
             
             video = pending_posts[0]
             
-            # Get Facebook credentials
-            page_id = os.getenv('FACEBOOK_PAGE_ID')
-            access_token = os.getenv('FACEBOOK_ACCESS_TOKEN')
+            # Get Facebook credentials — env vars first, then config.json
+            config = self._get_config()
+            page_id = os.getenv('FACEBOOK_PAGE_ID') or config.get('FACEBOOK_PAGE_ID')
+            access_token = os.getenv('FACEBOOK_ACCESS_TOKEN') or config.get('FACEBOOK_ACCESS_TOKEN')
             
             if not page_id or not access_token:
                 self.database.log_warning('scheduler', 'Facebook credentials not configured')

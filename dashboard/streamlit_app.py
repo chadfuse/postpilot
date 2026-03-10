@@ -263,25 +263,44 @@ elif page == "Videos":
     with tab1:
         st.subheader("Videos Pending Download")
         
-        pending_downloads = api_request("/videos/pending-download?limit=50")
+        pending_downloads = api_request("/videos/pending-download?limit=500")
         if pending_downloads and pending_downloads.get("success"):
             videos = pending_downloads.get("videos", [])
             
             if videos:
+                # Get queue status for ETA calculation
+                queue_data = api_request("/tasks/status")
+                dl_queue = queue_data.get("queues", {}).get("downloader", {})
+                dl_pending = dl_queue.get("pending", 0)
+                avg_download_sec = 45  # estimated per video
+                
                 for i, video in enumerate(videos):
-                    with st.expander(f"Video {i+1}: {video.get('tiktok_id', 'Unknown')}"):
+                    tid = video.get('tiktok_id', 'Unknown')
+                    author = video.get('author', '?')
+                    position = i + 1
+                    eta_sec = (position + dl_pending) * avg_download_sec
+                    eta_min = eta_sec // 60
+                    eta_sec_rem = eta_sec % 60
+                    eta_str = f"{eta_min}m {eta_sec_rem}s" if eta_min > 0 else f"{eta_sec}s"
+                    
+                    with st.expander(f"⏳ #{position} in queue • ~{eta_str} | @{author} — {tid}"):
                         col1, col2 = st.columns([3, 1])
                         
                         with col1:
-                            st.write(f"**TikTok ID:** {video.get('tiktok_id', 'Unknown')}")
-                            st.write(f"**Author:** {video.get('author', 'Unknown')}")
-                            st.write(f"**Caption:** {video.get('caption', 'No caption')[:100]}...")
+                            st.write(f"**TikTok ID:** {tid}")
+                            st.write(f"**Author:** @{author}")
+                            st.write(f"**Caption:** {(video.get('caption') or 'No caption')[:100]}...")
                             st.write(f"**Hashtags:** {', '.join(video.get('hashtags', []))}")
+                            st.caption(f"📍 Position {position} of {len(videos)} pending • {dl_pending} jobs in queue")
                         
                         with col2:
-                            if st.button(f"Download Now", key=f"download_{video.get('tiktok_id')}"):
-                                # This would trigger download task
-                                st.info("Download task queued")
+                            if st.button("⬇️ Download Now", key=f"download_{tid}", use_container_width=True):
+                                result = api_request(f"/tasks/download/{tid}", "POST")
+                                if result and result.get("success"):
+                                    st.success("Queued ✅")
+                                    st.rerun()
+                                else:
+                                    st.error("Failed")
             else:
                 st.info("No videos pending download")
         
@@ -306,25 +325,41 @@ elif page == "Videos":
     with tab2:
         st.subheader("Videos Pending Posting")
         
-        pending_posts = api_request("/videos/pending-post?limit=15")
+        pending_posts = api_request("/videos/pending-post?limit=500")
         if pending_posts and pending_posts.get("success"):
             videos = pending_posts.get("videos", [])
             
             if videos:
                 for i, video in enumerate(videos):
-                    with st.expander(f"Video {i+1}: {video.get('tiktok_id', 'Unknown')}"):
-                        col1, col2 = st.columns([3, 1])
+                    tid = video.get('tiktok_id', 'Unknown')
+                    with st.expander(f"Video {i+1}: @{video.get('author','?')} — {tid}"):
+                        col1, col2 = st.columns([2, 1])
                         
                         with col1:
-                            st.write(f"**TikTok ID:** {video.get('tiktok_id', 'Unknown')}")
-                            st.write(f"**Author:** {video.get('author', 'Unknown')}")
-                            st.write(f"**Caption:** {video.get('caption', 'No caption')[:100]}...")
+                            st.write(f"**TikTok ID:** {tid}")
+                            st.write(f"**Author:** @{video.get('author', 'Unknown')}")
+                            st.write(f"**Caption:** {(video.get('caption') or 'No caption')[:120]}...")
                             st.write(f"**Hashtags:** {', '.join(video.get('hashtags', []))}")
                         
                         with col2:
-                            if st.button(f"Post Now", key=f"post_{video.get('tiktok_id')}"):
-                                # This would trigger posting task
-                                st.info("Posting task queued")
+                            if st.button("⚡ Post Now", key=f"post_now_{tid}", type="primary", use_container_width=True):
+                                result = api_request(f"/tasks/post/{tid}", "POST")
+                                if result and result.get("success"):
+                                    st.success("Posted ✅")
+                                    st.rerun()
+                                else:
+                                    st.error("Failed to queue")
+                            
+                            st.caption("— or schedule —")
+                            sched_date = st.date_input("Date", key=f"sched_date_{tid}", label_visibility="collapsed")
+                            sched_time = st.time_input("Time", key=f"sched_time_{tid}", label_visibility="collapsed", step=300)
+                            if st.button("🕐 Schedule", key=f"sched_btn_{tid}", use_container_width=True):
+                                scheduled_dt = datetime.combine(sched_date, sched_time).isoformat()
+                                result = api_request(f"/tasks/post/{tid}/schedule?scheduled_at={scheduled_dt}", "POST")
+                                if result and result.get("success"):
+                                    st.success(f"Scheduled ✅\n{sched_date} {sched_time}")
+                                else:
+                                    st.error("Failed to schedule")
             else:
                 st.info("No videos pending posting")
         
@@ -366,14 +401,17 @@ elif page == "Videos":
             videos = all_videos_data.get("videos", [])
             st.caption(f"{len(videos)} video(s) found")
             if videos:
+                def _status(v):
+                    if v.get("posted"):     return "✅ Posted"
+                    if v.get("downloaded"): return "📥 Downloaded"
+                    return "⏳ Pending Download"
                 rows = []
                 for v in videos:
                     rows.append({
+                        "Status": _status(v),
                         "TikTok ID": v.get("tiktok_id", ""),
                         "Author": v.get("author", ""),
                         "Caption": (v.get("caption") or "")[:60],
-                        "Downloaded": "✅" if v.get("downloaded") else "❌",
-                        "Posted": "✅" if v.get("posted") else "❌",
                         "Created": v.get("created_at", "")[:16],
                     })
                 import pandas as pd
@@ -566,34 +604,52 @@ elif page == "Settings":
         
         col1, col2 = st.columns(2)
         
+        posts_range = st.slider(
+            "Posts Per Day (min – max)",
+            min_value=1, max_value=50,
+            value=(
+                int(current_config.get("MIN_POSTS_PER_DAY", 10)),
+                int(current_config.get("MAX_POSTS_PER_DAY", 15))
+            ),
+            step=1,
+            help="The scheduler will post a random number of videos within this range each day"
+        )
+        st.caption(f"Will post between **{posts_range[0]}** and **{posts_range[1]}** videos per day")
+
+        col1, col2 = st.columns(2)
         with col1:
-            max_posts = st.number_input(
-                "Max Posts Per Day",
-                min_value=1,
-                max_value=50,
-                value=current_config.get("MAX_POSTS_PER_DAY", 15)
+            scrape_range = st.slider(
+                "Scrape Interval (min – max minutes)",
+                min_value=5, max_value=480,
+                value=(
+                    int(current_config.get("MIN_SCRAPE_INTERVAL", 20)),
+                    int(current_config.get("MAX_SCRAPE_INTERVAL", 60))
+                ),
+                step=5,
+                help="Scraper will run at a random interval within this range"
             )
-            
-            scrape_interval = st.number_input(
-                "Scrape Interval (minutes)",
-                min_value=5,
-                max_value=1440,
-                value=current_config.get("SCRAPE_INTERVAL", 30)
-            )
-        
+            st.caption(f"Scrapes every **{scrape_range[0]}–{scrape_range[1]} min**")
         with col2:
-            post_interval = st.number_input(
-                "Post Interval (minutes)",
-                min_value=15,
-                max_value=1440,
-                value=current_config.get("POST_INTERVAL", 60)
+            post_range = st.slider(
+                "Post Interval (min – max minutes)",
+                min_value=5, max_value=480,
+                value=(
+                    int(current_config.get("MIN_POST_INTERVAL", 30)),
+                    int(current_config.get("MAX_POST_INTERVAL", 90))
+                ),
+                step=5,
+                help="Gap between posts will be a random value within this range"
             )
-        
+            st.caption(f"Posts every **{post_range[0]}–{post_range[1]} min**")
+
         if st.button("💾 Save Settings", type="primary"):
             settings_data = {
-                "max_posts_per_day": max_posts,
-                "scrape_interval": scrape_interval,
-                "post_interval": post_interval
+                "min_posts_per_day":    posts_range[0],
+                "max_posts_per_day":    posts_range[1],
+                "min_scrape_interval":  scrape_range[0],
+                "max_scrape_interval":  scrape_range[1],
+                "min_post_interval":    post_range[0],
+                "max_post_interval":    post_range[1],
             }
             
             result = api_request("/config", "PUT", settings_data)
@@ -605,39 +661,80 @@ elif page == "Settings":
 
 elif page == "Facebook":
     st.title("📘 Facebook Integration")
-    
+
+    config_data = api_request("/config")
+    current_config = config_data.get("config", {}) if config_data else {}
+
     col1, col2 = st.columns(2)
-    
+
     with col1:
-        st.subheader("Facebook Page Stats")
-        
-        fb_stats = api_request("/facebook/stats")
-        if fb_stats and fb_stats.get("success"):
-            if "page_name" in fb_stats:
-                st.write(f"**Page Name:** {fb_stats.get('page_name', 'Unknown')}")
-                st.write(f"**Username:** @{fb_stats.get('username', 'Unknown')}")
-                st.write(f"**Followers:** {format_number(fb_stats.get('followers', 0))}")
-                st.write(f"**Talking About:** {format_number(fb_stats.get('talking_about', 0))}")
-            else:
-                st.info("Facebook stats task queued - check back later")
-        else:
-            st.warning("Facebook credentials not configured or API error")
-    
+        st.subheader("🔑 Get Permanent Token")
+        st.caption("Paste a short-lived token and your app credentials — the app will exchange it for a permanent page token automatically.")
+
+        tab_auto, tab_manual = st.tabs(["⚡ Auto Exchange (Recommended)", "✏️ Paste Token Manually"])
+
+        with tab_auto:
+            st.caption("**Step 1:** Go to [Graph API Explorer](https://developers.facebook.com/tools/explorer/) → generate a short-lived User Access Token with `pages_manage_posts` and `publish_video` permissions.\n\n**Step 2:** Fill in the fields below.")
+            ex_page_id    = st.text_input("Page ID", value=current_config.get("FACEBOOK_PAGE_ID", ""), key="ex_page_id")
+            ex_app_id     = st.text_input("App ID", key="ex_app_id", placeholder="Your Facebook App ID")
+            ex_app_secret = st.text_input("App Secret", key="ex_app_secret", type="password", placeholder="Your Facebook App Secret")
+            ex_token      = st.text_area("Short-lived User Access Token", key="ex_token", height=80, placeholder="Paste the token from Graph API Explorer")
+
+            if st.button("� Exchange & Save Permanent Token", type="primary", use_container_width=True):
+                if not all([ex_page_id, ex_app_id, ex_app_secret, ex_token]):
+                    st.error("All fields are required")
+                else:
+                    with st.spinner("Exchanging token with Facebook..."):
+                        result = api_request(
+                            f"/facebook/exchange-token?short_lived_token={ex_token}&app_id={ex_app_id}&app_secret={ex_app_secret}&page_id={ex_page_id}",
+                            "POST"
+                        )
+                    if result and result.get("success"):
+                        st.success(f"✅ {result.get('message')}")
+                        st.balloons()
+                        st.rerun()
+                    else:
+                        st.error(f"Failed: {result}")
+
+        with tab_manual:
+            st.caption("Paste a token you already know is permanent (e.g. from Business Manager System User).")
+            new_page_id = st.text_input("Facebook Page ID", value=current_config.get("FACEBOOK_PAGE_ID", ""), key="fb_page_id")
+            new_token   = st.text_area("Page Access Token", value="", height=100, key="fb_token")
+            if st.button("💾 Save Token", type="primary", use_container_width=True):
+                if not new_token.strip():
+                    st.error("Token cannot be empty")
+                else:
+                    result = api_request("/config", "PUT", {
+                        "facebook_page_id": new_page_id,
+                        "facebook_access_token": new_token.strip()
+                    })
+                    if result and result.get("success"):
+                        st.success("✅ Token saved")
+                        st.rerun()
+                    else:
+                        st.error("Failed to save")
+
     with col2:
-        st.subheader("Configuration Status")
-        
-        # Check environment variables (these would be secrets in production)
-        if st.secrets.get("FACEBOOK_PAGE_ID") and st.secrets.get("FACEBOOK_ACCESS_TOKEN"):
-            st.markdown("🟢 **Facebook credentials configured**")
+        st.subheader("📊 Connection Status")
+
+        fb_stats = api_request("/facebook/stats")
+        if fb_stats and fb_stats.get("success") and "page_name" in fb_stats:
+            st.success("🟢 Token is valid")
+            st.write(f"**Page:** {fb_stats.get('page_name', 'Unknown')}")
+            st.write(f"**Username:** @{fb_stats.get('username', 'Unknown')}")
+            st.write(f"**Followers:** {format_number(fb_stats.get('followers', 0))}")
         else:
-            st.markdown("🔴 **Facebook credentials missing**")
-            st.info("Please configure Facebook credentials in Streamlit secrets")
-        
-        st.markdown("---")
-        st.write("**Required:**")
-        st.write("- Facebook Page ID")
-        st.write("- Facebook Access Token")
-        st.write("- Page must have video posting permissions")
+            st.error("🔴 Token expired or invalid — update credentials on the left")
+
+        st.subheader("📋 Recent Post Errors")
+        logs = api_request("/logs?limit=50")
+        if logs and logs.get("success"):
+            errors = [l for l in logs["logs"] if l.get("type") in ("error","warning") and "poster" in l.get("message","").lower() or "token" in l.get("message","").lower()][:5]
+            if errors:
+                for e in errors:
+                    st.caption(f"⚠️ {e['created_at'][:16]} — {e['message'][:120]}")
+            else:
+                st.info("No recent posting errors")
 
 # Footer
 st.sidebar.markdown("---")

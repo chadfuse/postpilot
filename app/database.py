@@ -242,7 +242,7 @@ class Database:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    SELECT tiktok_id, video_url, caption, author, hashtags
+                    SELECT tiktok_id, video_url, caption, author, hashtags, created_at
                     FROM videos 
                     WHERE downloaded = FALSE 
                     ORDER BY created_at ASC 
@@ -256,7 +256,8 @@ class Database:
                         'video_url': row[1],
                         'caption': row[2],
                         'author': row[3],
-                        'hashtags': json.loads(row[4]) if row[4] else []
+                        'hashtags': json.loads(row[4]) if row[4] else [],
+                        'created_at': row[5]
                     })
                 return results
         except sqlite3.Error as e:

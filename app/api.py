@@ -64,9 +64,14 @@ class VideoPostRequest(BaseModel):
     hashtags: Optional[List[str]] = None
 
 class ConfigUpdate(BaseModel):
+    facebook_page_id: Optional[str] = None
+    facebook_access_token: Optional[str] = None
+    min_posts_per_day: Optional[int] = None
     max_posts_per_day: Optional[int] = None
-    scrape_interval: Optional[int] = None
-    post_interval: Optional[int] = None
+    min_scrape_interval: Optional[int] = None
+    max_scrape_interval: Optional[int] = None
+    min_post_interval: Optional[int] = None
+    max_post_interval: Optional[int] = None
 
 # Helper functions
 def get_config():
@@ -77,10 +82,20 @@ def get_config():
             return json.load(f)
     except:
         return {
+            "MIN_POSTS_PER_DAY": 10,
             "MAX_POSTS_PER_DAY": 15,
-            "SCRAPE_INTERVAL": 30,
-            "POST_INTERVAL": 60
+            "MIN_SCRAPE_INTERVAL": 20,
+            "MAX_SCRAPE_INTERVAL": 60,
+            "MIN_POST_INTERVAL": 30,
+            "MAX_POST_INTERVAL": 90
         }
+
+def get_facebook_credentials():
+    """Get Facebook credentials from env vars, falling back to config.json"""
+    config = get_config()
+    page_id = os.getenv('FACEBOOK_PAGE_ID') or config.get('FACEBOOK_PAGE_ID')
+    access_token = os.getenv('FACEBOOK_ACCESS_TOKEN') or config.get('FACEBOOK_ACCESS_TOKEN')
+    return page_id, access_token
 
 def update_config(config_updates: Dict):
     """Update system configuration"""
@@ -277,6 +292,101 @@ async def delete_video(tiktok_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# Single-video task endpoints
+@app.post("/tasks/download/{tiktok_id}")
+async def download_single_video(tiktok_id: str):
+    """Queue download for a specific video by TikTok ID"""
+    try:
+        if not downloader_queue:
+            raise HTTPException(status_code=503, detail="Redis/RQ not available")
+        # Fetch video_url from DB
+        videos = database.get_videos(limit=1, offset=0)
+        # Need a direct lookup — use get_pending_downloads and filter
+        all_pending = database.get_pending_downloads(limit=500)
+        video = next((v for v in all_pending if v['tiktok_id'] == tiktok_id), None)
+        if not video:
+            raise HTTPException(status_code=404, detail="Video not found or already downloaded")
+        job = downloader_queue.enqueue(
+            download_video_task,
+            tiktok_id=tiktok_id,
+            video_url=video['video_url'],
+            database_path=os.getenv('DATABASE_PATH', 'app/database.db'),
+            download_path=os.getenv('DOWNLOAD_PATH', 'videos')
+        )
+        database.log_info('api', f'Queued download for video: {tiktok_id}')
+        return {"success": True, "job_id": job.id, "message": f"Download queued for {tiktok_id}"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/tasks/post/{tiktok_id}/schedule")
+async def schedule_single_video_post(tiktok_id: str, scheduled_at: str):
+    """Schedule a Facebook post for a specific video at a given ISO datetime (UTC)"""
+    try:
+        if not poster_queue:
+            raise HTTPException(status_code=503, detail="Redis/RQ not available")
+        page_id, access_token = get_facebook_credentials()
+        if not page_id or not access_token:
+            raise HTTPException(status_code=400, detail="Facebook credentials not configured")
+        all_pending = database.get_pending_posts(limit=500)
+        video = next((v for v in all_pending if v['tiktok_id'] == tiktok_id), None)
+        if not video:
+            raise HTTPException(status_code=404, detail="Video not found, not downloaded, or already posted")
+        scheduled_dt = datetime.fromisoformat(scheduled_at)
+        job = poster_queue.enqueue_at(
+            scheduled_dt,
+            post_video_task,
+            tiktok_id=tiktok_id,
+            video_path=video['file_path'],
+            caption=video.get('caption', ''),
+            author=video.get('author', ''),
+            hashtags=video.get('hashtags', []),
+            page_id=page_id,
+            access_token=access_token,
+            database_path=os.getenv('DATABASE_PATH', 'app/database.db')
+        )
+        database.log_info('api', f'Scheduled post for video {tiktok_id} at {scheduled_at}')
+        return {"success": True, "job_id": job.id, "message": f"Post scheduled for {scheduled_at}"}
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid datetime format. Use ISO format e.g. 2026-03-10T21:00:00")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/tasks/post/{tiktok_id}")
+async def post_single_video(tiktok_id: str):
+    """Queue Facebook post for a specific downloaded video"""
+    try:
+        if not poster_queue:
+            raise HTTPException(status_code=503, detail="Redis/RQ not available")
+        page_id, access_token = get_facebook_credentials()
+        if not page_id or not access_token:
+            raise HTTPException(status_code=400, detail="Facebook credentials not configured")
+        # Get video details from pending posts
+        all_pending = database.get_pending_posts(limit=500)
+        video = next((v for v in all_pending if v['tiktok_id'] == tiktok_id), None)
+        if not video:
+            raise HTTPException(status_code=404, detail="Video not found, not downloaded, or already posted")
+        job = poster_queue.enqueue(
+            post_video_task,
+            tiktok_id=tiktok_id,
+            video_path=video['file_path'],
+            caption=video.get('caption', ''),
+            author=video.get('author', ''),
+            hashtags=video.get('hashtags', []),
+            page_id=page_id,
+            access_token=access_token,
+            database_path=os.getenv('DATABASE_PATH', 'app/database.db')
+        )
+        database.log_info('api', f'Queued post for video: {tiktok_id}')
+        return {"success": True, "job_id": job.id, "message": f"Post queued for {tiktok_id}"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 # Task Management
 @app.post("/tasks/scrape-keyword/{keyword}")
 async def scrape_keyword(keyword: str, background_tasks: BackgroundTasks):
@@ -354,9 +464,7 @@ async def post_pending_videos(background_tasks: BackgroundTasks, limit: int = Qu
         if not poster_queue:
             raise HTTPException(status_code=503, detail="Redis/RQ not available")
         
-        page_id = os.getenv('FACEBOOK_PAGE_ID')
-        access_token = os.getenv('FACEBOOK_ACCESS_TOKEN')
-        
+        page_id, access_token = get_facebook_credentials()
         if not page_id or not access_token:
             raise HTTPException(status_code=400, detail="Facebook credentials not configured")
         
@@ -484,13 +592,68 @@ async def get_logs(limit: int = Query(default=100, le=500)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/facebook/exchange-token")
+async def exchange_facebook_token(
+    short_lived_token: str,
+    app_id: str,
+    app_secret: str,
+    page_id: str = None
+):
+    """Exchange short-lived user token for a permanent page access token and save it"""
+    try:
+        import requests as req
+        graph = "https://graph.facebook.com/v18.0"
+
+        # Step 1: Exchange short-lived → long-lived user token (60 days)
+        r1 = req.get(f"{graph}/oauth/access_token", params={
+            "grant_type": "fb_exchange_token",
+            "client_id": app_id,
+            "client_secret": app_secret,
+            "fb_exchange_token": short_lived_token
+        }, timeout=10)
+        if r1.status_code != 200:
+            raise HTTPException(status_code=400, detail=f"Token exchange failed: {r1.json().get('error', {}).get('message', r1.text)}")
+        long_lived_token = r1.json().get("access_token")
+        if not long_lived_token:
+            raise HTTPException(status_code=400, detail="No long-lived token returned")
+
+        # Step 2: Get permanent page access token
+        _, _cfg_page_id = get_facebook_credentials()
+        pid = page_id or _cfg_page_id
+        if not pid:
+            raise HTTPException(status_code=400, detail="page_id is required")
+        r2 = req.get(f"{graph}/{pid}", params={
+            "fields": "access_token,name",
+            "access_token": long_lived_token
+        }, timeout=10)
+        if r2.status_code != 200:
+            raise HTTPException(status_code=400, detail=f"Page token fetch failed: {r2.json().get('error', {}).get('message', r2.text)}")
+        data = r2.json()
+        page_token = data.get("access_token")
+        page_name  = data.get("name", "Unknown")
+        if not page_token:
+            raise HTTPException(status_code=400, detail="No page token returned — ensure the user manages this page")
+
+        # Step 3: Save both page_id and permanent token to config
+        update_config({"FACEBOOK_PAGE_ID": pid, "FACEBOOK_ACCESS_TOKEN": page_token})
+        database.log_info('api', f'Saved permanent page token for: {page_name}')
+
+        return {
+            "success": True,
+            "page_name": page_name,
+            "page_id": pid,
+            "message": f"Permanent page token saved for '{page_name}'. It will not expire unless permissions are revoked."
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/facebook/stats")
 async def get_facebook_stats():
     """Get Facebook page statistics"""
     try:
-        page_id = os.getenv('FACEBOOK_PAGE_ID')
-        access_token = os.getenv('FACEBOOK_ACCESS_TOKEN')
-        
+        page_id, access_token = get_facebook_credentials()
         if not page_id or not access_token:
             raise HTTPException(status_code=400, detail="Facebook credentials not configured")
         
@@ -534,12 +697,22 @@ async def update_system_config(config_update: ConfigUpdate):
     """Update system configuration"""
     try:
         updates = {}
+        if config_update.facebook_page_id is not None:
+            updates["FACEBOOK_PAGE_ID"] = config_update.facebook_page_id
+        if config_update.facebook_access_token is not None:
+            updates["FACEBOOK_ACCESS_TOKEN"] = config_update.facebook_access_token
+        if config_update.min_posts_per_day is not None:
+            updates["MIN_POSTS_PER_DAY"] = config_update.min_posts_per_day
         if config_update.max_posts_per_day is not None:
             updates["MAX_POSTS_PER_DAY"] = config_update.max_posts_per_day
-        if config_update.scrape_interval is not None:
-            updates["SCRAPE_INTERVAL"] = config_update.scrape_interval
-        if config_update.post_interval is not None:
-            updates["POST_INTERVAL"] = config_update.post_interval
+        if config_update.min_scrape_interval is not None:
+            updates["MIN_SCRAPE_INTERVAL"] = config_update.min_scrape_interval
+        if config_update.max_scrape_interval is not None:
+            updates["MAX_SCRAPE_INTERVAL"] = config_update.max_scrape_interval
+        if config_update.min_post_interval is not None:
+            updates["MIN_POST_INTERVAL"] = config_update.min_post_interval
+        if config_update.max_post_interval is not None:
+            updates["MAX_POST_INTERVAL"] = config_update.max_post_interval
         
         if not updates:
             raise HTTPException(status_code=400, detail="No valid configuration updates provided")
