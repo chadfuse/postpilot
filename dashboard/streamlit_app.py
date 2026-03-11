@@ -13,36 +13,57 @@ API_BASE_URL = os.getenv("API_BASE_URL") or st.secrets.get("API_BASE_URL", "http
 
 # Page configuration
 st.set_page_config(
-    page_title="TikTok Video Collector Dashboard",
-    page_icon="📱",
+    page_title="PostPilot - TikTok to Facebook Automation",
+    page_icon="PP",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS
-st.markdown("""
-<style>
-.metric-container {
-    background-color: #f0f2f6;
-    border: 1px solid #e0e0e0;
-    padding: 1rem;
-    border-radius: 0.5rem;
-    margin: 0.5rem 0;
+# Clean Light Theme
+st.markdown('<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">', unsafe_allow_html=True)
+
+st.markdown("""<style>
+.stApp { background-color: #ffffff !important; }
+[data-testid="stSidebar"] { background-color: #f8f9fa !important; border-right: 1px solid #e9ecef; }
+.status-running { color: #28a745 !important; font-weight: bold; }
+.status-error   { color: #dc3545 !important; font-weight: bold; }
+.status-warning { color: #ffc107 !important; font-weight: bold; }
+
+/* Sidebar nav buttons */
+[data-testid="stSidebar"] .stButton > button {
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    color: #495057;
+    border: none;
+    border-radius: 8px;
+    padding: 0.6rem 1rem;
+    font-size: 0.95rem;
+    font-weight: 500;
+    box-shadow: none;
+    transition: background 0.15s;
 }
-.status-running {
-    color: #00c851;
-    font-weight: bold;
+[data-testid="stSidebar"] .stButton > button:hover {
+    background: #e9ecef;
+    color: #212529;
+    transform: none;
+    box-shadow: none;
 }
-.status-error {
-    color: #ff4444;
-    font-weight: bold;
+[data-testid="stSidebar"] .stButton > button:focus {
+    box-shadow: none;
 }
-.status-warning {
-    color: #ffbb33;
-    font-weight: bold;
+[data-testid="stSidebar"] .stButton > button[kind="primary"] {
+    background: #667eea !important;
+    color: #fff !important;
+    font-weight: 600;
+    box-shadow: none;
 }
-</style>
-""", unsafe_allow_html=True)
+[data-testid="stSidebar"] .stButton > button[kind="primary"]:hover {
+    background: #5a6fd6 !important;
+    transform: none;
+    box-shadow: none;
+}
+</style>""", unsafe_allow_html=True)
 
 # Helper functions
 def api_request(endpoint: str, method: str = "GET", data: dict = None):
@@ -89,73 +110,71 @@ def get_status_color(status: str) -> str:
     else:
         return "status-warning"
 
-# Sidebar
-st.sidebar.title("🎯 TikTok Collector")
+# Sidebar branding
+st.sidebar.markdown("""
+<div style="text-align:center; padding: 0.5rem 0 1rem 0;">
+    <div style="font-size: 1.6rem; font-weight: 700; color: #212529;">PostPilot</div>
+    <div style="font-size: 0.8rem; color: #6c757d;">TikTok → Facebook Automation</div>
+</div>
+""", unsafe_allow_html=True)
+
 st.sidebar.markdown("---")
 
-# Navigation
-page = st.sidebar.selectbox(
-    "Navigate to",
-    ["Dashboard", "Keywords", "Videos", "Tasks", "Logs", "Settings", "Facebook"]
-)
+# Vertical tab navigation with Font Awesome icons
+NAV_ITEMS = [
+    ("Dashboard",  "fa-solid fa-gauge-high"),
+    ("Keywords",   "fa-solid fa-hashtag"),
+    ("Videos",     "fa-solid fa-film"),
+    ("Tasks",      "fa-solid fa-list-check"),
+    ("Logs",       "fa-solid fa-scroll"),
+    ("Settings",   "fa-solid fa-gear"),
+    ("Facebook",   "fa-brands fa-facebook"),
+]
 
-# Health check in sidebar
-with st.sidebar.expander("System Health", expanded=False):
-    health = api_request("/health")
-    if health:
-        st.markdown(f"""
-        <div class="status-{get_status_color(health.get('status', 'unknown'))}">
-            Status: {health.get('status', 'Unknown').upper()}
-        </div>
-        """, unsafe_allow_html=True)
-        
-        st.write(f"**Database:** {health.get('database', 'Unknown')}")
-        st.write(f"**Redis:** {health.get('redis', 'Unknown')}")
-        st.write(f"**Time:** {health.get('timestamp', 'Unknown')}")
+if "page" not in st.session_state:
+    st.session_state.page = "Dashboard"
+
+for name, icon in NAV_ITEMS:
+    is_active = st.session_state.page == name
+    btn_type = "primary" if is_active else "secondary"
+    if st.sidebar.button(f"  {name}", key=f"nav_{name}", type=btn_type, use_container_width=True):
+        st.session_state.page = name
+        st.rerun()
+
+page = st.session_state.page
+
+# System Health in sidebar
+st.sidebar.markdown("---")
+health = api_request("/health")
+if health:
+    status = health.get('status', 'unknown')
+    if status == 'healthy':
+        st.sidebar.success(f"System: {status.upper()}")
+    else:
+        st.sidebar.error(f"System: {status.upper()}")
+    col_h1, col_h2 = st.sidebar.columns(2)
+    col_h1.caption(f"DB: {health.get('database', '?')}")
+    col_h2.caption(f"Redis: {health.get('redis', '?')}")
 
 # Main content
 if page == "Dashboard":
-    st.title("📊 System Dashboard")
+    st.title("System Dashboard")
+    st.caption("Real-time monitoring of your TikTok → Facebook automation")
     
     # Get system stats
     stats = api_request("/stats")
     if stats and stats.get("success"):
         db_stats = stats.get("database", {})
         
-        # Metrics row
         col1, col2, col3, col4 = st.columns(4)
-        
         with col1:
-            st.markdown(f"""
-            <div class="metric-container">
-                <h3>{format_number(db_stats.get('overall', {}).get('total_videos', 0))}</h3>
-                <p>Total Videos</p>
-            </div>
-            """, unsafe_allow_html=True)
-        
+            st.metric("Total Videos", format_number(db_stats.get('overall', {}).get('total_videos', 0)))
         with col2:
-            st.markdown(f"""
-            <div class="metric-container">
-                <h3>{format_number(db_stats.get('today', {}).get('downloaded', 0))}</h3>
-                <p>Downloaded Today</p>
-            </div>
-            """, unsafe_allow_html=True)
-        
+            st.metric("Downloaded Today", format_number(db_stats.get('today', {}).get('downloaded', 0)))
         with col3:
-            st.markdown(f"""
-            <div class="metric-container">
-                <h3>{format_number(db_stats.get('today', {}).get('posted', 0))}</h3>
-                <p>Posted Today</p>
-            </div>
-            """, unsafe_allow_html=True)
-        
+            st.metric("Posted Today", format_number(db_stats.get('today', {}).get('posted', 0)))
         with col4:
-            st.markdown(f"""
-            <div class="metric-container">
-                <h3>{format_number(db_stats.get('overall', {}).get('keywords', 0))}</h3>
-                <p>Active Keywords</p>
-            </div>
-            """, unsafe_allow_html=True)
+            st.metric("Active Keywords", format_number(db_stats.get('overall', {}).get('keywords', 0)))
         
         st.markdown("---")
         
@@ -204,7 +223,7 @@ if page == "Dashboard":
                 st.metric("Started", queue_data.get("started_jobs", 0))
 
 elif page == "Keywords":
-    st.title("🔍 Keywords Management")
+    st.title("Keywords Management")
     
     col1, col2 = st.columns([2, 1])
     
@@ -255,7 +274,8 @@ elif page == "Keywords":
                         st.error("Failed to remove keyword")
 
 elif page == "Videos":
-    st.title("📹 Videos Management")
+    st.title("Videos Management")
+    st.caption("Manage your video pipeline from download to posting")
     
     # Tabs for different video views
     tab1, tab2, tab3, tab4 = st.tabs(["Pending Downloads", "Pending Posts", "All Videos", "Task Status"])
@@ -274,6 +294,11 @@ elif page == "Videos":
                 dl_pending = dl_queue.get("pending", 0)
                 avg_download_sec = 45  # estimated per video
                 
+                # Initialize session state for checkboxes
+                if 'selected_downloads' not in st.session_state:
+                    st.session_state.selected_downloads = {}
+                
+                st.subheader("Select videos to download:")
                 for i, video in enumerate(videos):
                     tid = video.get('tiktok_id', 'Unknown')
                     author = video.get('author', '?')
@@ -283,34 +308,56 @@ elif page == "Videos":
                     eta_sec_rem = eta_sec % 60
                     eta_str = f"{eta_min}m {eta_sec_rem}s" if eta_min > 0 else f"{eta_sec}s"
                     
-                    with st.expander(f"⏳ #{position} in queue • ~{eta_str} | @{author} — {tid}"):
-                        col1, col2 = st.columns([3, 1])
-                        
-                        with col1:
-                            st.write(f"**TikTok ID:** {tid}")
-                            st.write(f"**Author:** @{author}")
-                            st.write(f"**Caption:** {(video.get('caption') or 'No caption')[:100]}...")
-                            st.write(f"**Hashtags:** {', '.join(video.get('hashtags', []))}")
-                            st.caption(f"📍 Position {position} of {len(videos)} pending • {dl_pending} jobs in queue")
-                        
-                        with col2:
-                            if st.button("⬇️ Download Now", key=f"download_{tid}", use_container_width=True):
-                                result = api_request(f"/tasks/download/{tid}", "POST")
-                                if result and result.get("success"):
-                                    st.success("Queued ✅")
-                                    st.rerun()
-                                else:
-                                    st.error("Failed")
+                    # Checkbox for selection
+                    checked = st.checkbox(f"#{position} • ~{eta_str} | @{author} — {tid}", 
+                                       key=f"dl_check_{tid}",
+                                       value=st.session_state.selected_downloads.get(tid, False))
+                    st.session_state.selected_downloads[tid] = checked
+                    
+                    if checked:
+                        with st.expander(f"Details for {tid}", expanded=False):
+                            col1, col2 = st.columns([3, 1])
+                            
+                            with col1:
+                                st.write(f"**TikTok ID:** {tid}")
+                                st.write(f"**Author:** @{author}")
+                                st.write(f"**Caption:** {(video.get('caption') or 'No caption')[:100]}...")
+                                st.write(f"**Hashtags:** {', '.join(video.get('hashtags', []))}")
+                                st.caption(f"Position {position} of {len(videos)} pending • {dl_pending} jobs in queue")
+                            
+                            with col2:
+                                if st.button("Download Now", key=f"download_{tid}", use_container_width=True):
+                                    result = api_request(f"/tasks/download/{tid}", "POST")
+                                    if result and result.get("success"):
+                                        st.success("Queued")
+                                        st.rerun()
+                                    else:
+                                        st.error("Failed")
             else:
                 st.info("No videos pending download")
         
-        col_btn1, col_btn2 = st.columns(2)
+        # Bulk operations
+        selected_count = sum(1 for v in videos if st.session_state.selected_downloads.get(v.get('tiktok_id'), False)) if videos else 0
+        
+        col_btn1, col_btn2, col_btn3 = st.columns([2, 2, 1])
         with col_btn1:
-            if st.button("Download All Pending", type="primary"):
+            if st.button(f"Download All Pending", type="primary"):
                 result = api_request("/tasks/download-pending", "POST")
                 if result and result.get("success"):
                     st.success(result.get("message", "Download task queued"))
         with col_btn2:
+            if st.button(f"Download Selected ({selected_count})", type="primary", disabled=selected_count == 0):
+                selected_ids = [v.get('tiktok_id') for v in videos if st.session_state.selected_downloads.get(v.get('tiktok_id'), False)]
+                success_count = 0
+                for tid in selected_ids:
+                    result = api_request(f"/tasks/download/{tid}", "POST")
+                    if result and result.get("success"):
+                        success_count += 1
+                if success_count > 0:
+                    st.success(f"Queued {success_count}/{len(selected_ids)} videos for download")
+                    st.session_state.selected_downloads = {}  # Clear selections
+                    st.rerun()
+        with col_btn3:
             if st.button("Clear All Pending", key="clear_dl", type="secondary"):
                 if st.session_state.get("confirm_clear_dl"):
                     result = api_request("/videos/pending-download", "DELETE")
@@ -321,6 +368,13 @@ elif page == "Videos":
                 else:
                     st.session_state["confirm_clear_dl"] = True
                     st.warning("Click again to confirm clearing all pending downloads")
+        
+        # Download progress indicator
+        if dl_pending > 0:
+            st.info(f"{dl_pending} videos currently downloading...")
+            # Show a simple progress bar while downloads are in queue
+            progress_bar = st.progress(0.5, text=f"Processing {dl_pending} downloads...")
+            # The bar will auto-refresh when page reloads after downloads complete
     
     with tab2:
         st.subheader("Videos Pending Posting")
@@ -330,46 +384,77 @@ elif page == "Videos":
             videos = pending_posts.get("videos", [])
             
             if videos:
+                # Initialize session state for checkboxes
+                if 'selected_posts' not in st.session_state:
+                    st.session_state.selected_posts = {}
+                
+                st.subheader("Select videos to post:")
                 for i, video in enumerate(videos):
                     tid = video.get('tiktok_id', 'Unknown')
-                    with st.expander(f"Video {i+1}: @{video.get('author','?')} — {tid}"):
-                        col1, col2 = st.columns([2, 1])
-                        
-                        with col1:
-                            st.write(f"**TikTok ID:** {tid}")
-                            st.write(f"**Author:** @{video.get('author', 'Unknown')}")
-                            st.write(f"**Caption:** {(video.get('caption') or 'No caption')[:120]}...")
-                            st.write(f"**Hashtags:** {', '.join(video.get('hashtags', []))}")
-                        
-                        with col2:
-                            if st.button("⚡ Post Now", key=f"post_now_{tid}", type="primary", use_container_width=True):
-                                result = api_request(f"/tasks/post/{tid}", "POST")
-                                if result and result.get("success"):
-                                    st.success("Posted ✅")
-                                    st.rerun()
-                                else:
-                                    st.error("Failed to queue")
+                    author = video.get('author', 'Unknown')
+                    
+                    # Checkbox for selection
+                    checked = st.checkbox(f"#{i+1} | @{author} — {tid}", 
+                                       key=f"post_check_{tid}",
+                                       value=st.session_state.selected_posts.get(tid, False))
+                    st.session_state.selected_posts[tid] = checked
+                    
+                    if checked:
+                        with st.expander(f"Details for {tid}", expanded=False):
+                            col1, col2 = st.columns([2, 1])
                             
-                            st.caption("— or schedule —")
-                            sched_date = st.date_input("Date", key=f"sched_date_{tid}", label_visibility="collapsed")
-                            sched_time = st.time_input("Time", key=f"sched_time_{tid}", label_visibility="collapsed", step=300)
-                            if st.button("🕐 Schedule", key=f"sched_btn_{tid}", use_container_width=True):
-                                scheduled_dt = datetime.combine(sched_date, sched_time).isoformat()
-                                result = api_request(f"/tasks/post/{tid}/schedule?scheduled_at={scheduled_dt}", "POST")
-                                if result and result.get("success"):
-                                    st.success(f"Scheduled ✅\n{sched_date} {sched_time}")
-                                else:
-                                    st.error("Failed to schedule")
+                            with col1:
+                                st.write(f"**TikTok ID:** {tid}")
+                                st.write(f"**Author:** @{author}")
+                                st.write(f"**Caption:** {(video.get('caption') or 'No caption')[:120]}...")
+                                st.write(f"**Hashtags:** {', '.join(video.get('hashtags', []))}")
+                                if video.get('file_path'):
+                                    st.write(f"**File:** {video['file_path']}")
+                            
+                            with col2:
+                                if st.button("Post Now", key=f"post_now_{tid}", type="primary", use_container_width=True):
+                                    result = api_request(f"/tasks/post/{tid}", "POST")
+                                    if result and result.get("success"):
+                                        st.success("Posted")
+                                        st.rerun()
+                                    else:
+                                        st.error("Failed to queue")
+                                
+                                st.caption("— or schedule —")
+                                sched_date = st.date_input("Date", key=f"sched_date_{tid}", label_visibility="collapsed")
+                                sched_time = st.time_input("Time", key=f"sched_time_{tid}", label_visibility="collapsed", step=300)
+                                if st.button("Schedule", key=f"sched_btn_{tid}", use_container_width=True):
+                                    scheduled_dt = datetime.combine(sched_date, sched_time).isoformat()
+                                    result = api_request(f"/tasks/post/{tid}/schedule?scheduled_at={scheduled_dt}", "POST")
+                                    if result and result.get("success"):
+                                        st.success(f"Scheduled for {sched_date} {sched_time}")
+                                    else:
+                                        st.error("Failed to schedule")
             else:
                 st.info("No videos pending posting")
         
-        col_btn1, col_btn2 = st.columns(2)
+        # Bulk operations
+        selected_post_count = sum(1 for v in videos if st.session_state.selected_posts.get(v.get('tiktok_id'), False)) if videos else 0
+        
+        col_btn1, col_btn2, col_btn3 = st.columns([2, 2, 1])
         with col_btn1:
             if st.button("Post All Pending", type="primary"):
                 result = api_request("/tasks/post-pending", "POST")
                 if result and result.get("success"):
                     st.success(result.get("message", "Posting task queued"))
         with col_btn2:
+            if st.button(f"Post Selected ({selected_post_count})", type="primary", disabled=selected_post_count == 0):
+                selected_ids = [v.get('tiktok_id') for v in videos if st.session_state.selected_posts.get(v.get('tiktok_id'), False)]
+                success_count = 0
+                for tid in selected_ids:
+                    result = api_request(f"/tasks/post/{tid}", "POST")
+                    if result and result.get("success"):
+                        success_count += 1
+                if success_count > 0:
+                    st.success(f"Queued {success_count}/{len(selected_ids)} videos for posting")
+                    st.session_state.selected_posts = {}  # Clear selections
+                    st.rerun()
+        with col_btn3:
             if st.button("Clear All Pending", key="clear_post", type="secondary"):
                 if st.session_state.get("confirm_clear_post"):
                     result = api_request("/videos/pending-post", "DELETE")
@@ -402,9 +487,9 @@ elif page == "Videos":
             st.caption(f"{len(videos)} video(s) found")
             if videos:
                 def _status(v):
-                    if v.get("posted"):     return "✅ Posted"
-                    if v.get("downloaded"): return "📥 Downloaded"
-                    return "⏳ Pending Download"
+                    if v.get("posted"):     return "Posted"
+                    if v.get("downloaded"): return "Downloaded"
+                    return "Pending Download"
                 rows = []
                 for v in videos:
                     rows.append({
@@ -437,7 +522,7 @@ elif page == "Videos":
         status = api_request("/tasks/status")
         if status and status.get("success"):
             for qname, qinfo in status.get("queues", {}).items():
-                with st.expander(f"📋 {qname.title()} Queue"):
+                with st.expander(f"{qname.title()} Queue"):
                     col1, col2, col3 = st.columns(3)
                     with col1:
                         st.metric("Pending", qinfo.get("pending", 0))
@@ -463,7 +548,7 @@ elif page == "Videos":
             st.error("Failed to load task status")
 
 elif page == "Tasks":
-    st.title("⚙️ Task Management")
+    st.title("Task Management")
 
     # --- Live stats banner ---
     stats      = api_request("/stats")
@@ -485,30 +570,30 @@ elif page == "Tasks":
     col1, col2 = st.columns(2)
 
     with col1:
-        st.subheader("▶️ Manual Tasks")
+        st.subheader("Manual Tasks")
 
-        if st.button("🔍 Scrape All Keywords", type="primary", use_container_width=True):
+        if st.button("Scrape All Keywords", type="primary", use_container_width=True):
             result = api_request("/tasks/scrape-all", "POST")
             if result and result.get("success"):
                 st.success(result.get("message", "Scraping task queued"))
             else:
                 st.error("Failed to queue scraping task")
 
-        if st.button("⬇️ Download Pending Videos", use_container_width=True):
+        if st.button("Download Pending Videos", use_container_width=True):
             result = api_request("/tasks/download-pending", "POST")
             if result and result.get("success"):
                 st.success(result.get("message", "Download task queued"))
             else:
                 st.error("Failed to queue download task")
 
-        if st.button("📤 Post Pending Videos", use_container_width=True):
+        if st.button("Post Pending Videos", use_container_width=True):
             result = api_request("/tasks/post-pending", "POST")
             if result and result.get("success"):
                 st.success(result.get("message", "Posting task queued"))
             else:
                 st.error("Failed to queue posting task")
 
-        if st.button("🧹 Cleanup Old Files", use_container_width=True):
+        if st.button("Cleanup Old Files", use_container_width=True):
             result = api_request("/tasks/cleanup", "POST")
             if result and result.get("success"):
                 st.success(result.get("message", "Cleanup task queued"))
@@ -516,7 +601,7 @@ elif page == "Tasks":
                 st.error("Failed to queue cleanup task")
 
     with col2:
-        st.subheader("📊 Queue Status")
+        st.subheader("Queue Status")
 
         task_status = api_request("/tasks/status")
         if task_status and task_status.get("success"):
@@ -529,10 +614,10 @@ elif page == "Tasks":
             mc2.metric("Failed Jobs", total_failed)
 
             for qname, qinfo in queues.items():
-                icon = {"scraper": "🔍", "downloader": "⬇️", "poster": "📤", "cleanup": "🧹"}.get(qname, "📋")
+                icon = {"scraper": "S", "downloader": "D", "poster": "P", "cleanup": "C"}.get(qname, "-")
                 p = qinfo.get("pending", 0)
                 f = qinfo.get("failed", 0)
-                status_str = f"{'🟢' if p == 0 and f == 0 else '🟡' if p > 0 else '🔴'}  pending: {p}  |  failed: {f}"
+                status_str = f"pending: {p}  |  failed: {f}"
                 st.write(f"{icon} **{qname.title()}** — {status_str}")
 
                 for job in qinfo.get("jobs", []):
@@ -545,7 +630,7 @@ elif page == "Tasks":
             st.warning("Queue status unavailable — Redis may be disconnected")
 
 elif page == "Logs":
-    st.title("📋 System Logs")
+    st.title("System Logs")
     
     # Log filters
     col1, col2, col3 = st.columns(3)
@@ -557,7 +642,7 @@ elif page == "Logs":
         log_type = st.selectbox("Log type", ["All", "info", "error", "warning"])
     
     with col3:
-        if st.button("🔄 Refresh"):
+        if st.button("Refresh"):
             st.rerun()
     
     # Get logs
@@ -576,11 +661,11 @@ elif page == "Logs":
                 
                 # Color coding
                 if "error" in log.get("type", "").lower():
-                    st.markdown(f"🔴 **{log_type_display}** - **{component}**")
+                    st.markdown(f"**{log_type_display}** - **{component}**")
                 elif "warning" in log.get("type", "").lower():
-                    st.markdown(f"🟡 **{log_type_display}** - **{component}**")
+                    st.markdown(f"**{log_type_display}** - **{component}**")
                 else:
-                    st.markdown(f"🟢 **{log_type_display}** - **{component}**")
+                    st.markdown(f"**{log_type_display}** - **{component}**")
                 
                 st.write(f"**Message:** {log.get('message', 'No message')}")
                 if log.get("details"):
@@ -593,7 +678,8 @@ elif page == "Logs":
         st.error("Failed to fetch logs")
 
 elif page == "Settings":
-    st.title("⚙️ System Settings")
+    st.title("System Settings")
+    st.caption("Configure automation parameters and intervals")
     
     # Get current config
     config_data = api_request("/config")
@@ -601,6 +687,7 @@ elif page == "Settings":
         current_config = config_data.get("config", {})
         
         st.subheader("System Configuration")
+        st.caption("Set ranges for randomized automation behavior")
         
         col1, col2 = st.columns(2)
         
@@ -660,7 +747,8 @@ elif page == "Settings":
                 st.error("Failed to save settings")
 
 elif page == "Facebook":
-    st.title("📘 Facebook Integration")
+    st.title("Facebook Integration")
+    st.caption("Manage your Facebook page connection and posting settings")
 
     config_data = api_request("/config")
     current_config = config_data.get("config", {}) if config_data else {}
@@ -668,10 +756,10 @@ elif page == "Facebook":
     col1, col2 = st.columns(2)
 
     with col1:
-        st.subheader("🔑 Get Permanent Token")
+        st.subheader("Get Permanent Token")
         st.caption("Paste a short-lived token and your app credentials — the app will exchange it for a permanent page token automatically.")
 
-        tab_auto, tab_manual = st.tabs(["⚡ Auto Exchange (Recommended)", "✏️ Paste Token Manually"])
+        tab_auto, tab_manual = st.tabs(["Auto Exchange (Recommended)", "Paste Token Manually"])
 
         with tab_auto:
             st.caption("**Step 1:** Go to [Graph API Explorer](https://developers.facebook.com/tools/explorer/) → generate a short-lived User Access Token with `pages_manage_posts` and `publish_video` permissions.\n\n**Step 2:** Fill in the fields below.")
@@ -680,7 +768,7 @@ elif page == "Facebook":
             ex_app_secret = st.text_input("App Secret", key="ex_app_secret", type="password", placeholder="Your Facebook App Secret")
             ex_token      = st.text_area("Short-lived User Access Token", key="ex_token", height=80, placeholder="Paste the token from Graph API Explorer")
 
-            if st.button("� Exchange & Save Permanent Token", type="primary", use_container_width=True):
+            if st.button("Exchange & Save Permanent Token", type="primary", use_container_width=True):
                 if not all([ex_page_id, ex_app_id, ex_app_secret, ex_token]):
                     st.error("All fields are required")
                 else:
@@ -690,7 +778,7 @@ elif page == "Facebook":
                             "POST"
                         )
                     if result and result.get("success"):
-                        st.success(f"✅ {result.get('message')}")
+                        st.success(f"{result.get('message')}")
                         st.balloons()
                         st.rerun()
                     else:
@@ -700,7 +788,7 @@ elif page == "Facebook":
             st.caption("Paste a token you already know is permanent (e.g. from Business Manager System User).")
             new_page_id = st.text_input("Facebook Page ID", value=current_config.get("FACEBOOK_PAGE_ID", ""), key="fb_page_id")
             new_token   = st.text_area("Page Access Token", value="", height=100, key="fb_token")
-            if st.button("💾 Save Token", type="primary", use_container_width=True):
+            if st.button("Save Token", type="primary", use_container_width=True):
                 if not new_token.strip():
                     st.error("Token cannot be empty")
                 else:
@@ -709,35 +797,35 @@ elif page == "Facebook":
                         "facebook_access_token": new_token.strip()
                     })
                     if result and result.get("success"):
-                        st.success("✅ Token saved")
+                        st.success("Token saved")
                         st.rerun()
                     else:
                         st.error("Failed to save")
 
     with col2:
-        st.subheader("📊 Connection Status")
+        st.subheader("Connection Status")
 
         fb_stats = api_request("/facebook/stats")
         if fb_stats and fb_stats.get("success") and "page_name" in fb_stats:
-            st.success("🟢 Token is valid")
+            st.success("Token is valid")
             st.write(f"**Page:** {fb_stats.get('page_name', 'Unknown')}")
             st.write(f"**Username:** @{fb_stats.get('username', 'Unknown')}")
             st.write(f"**Followers:** {format_number(fb_stats.get('followers', 0))}")
         else:
-            st.error("🔴 Token expired or invalid — update credentials on the left")
+            st.error("Token expired or invalid — update credentials on the left")
 
-        st.subheader("📋 Recent Post Errors")
+        st.subheader("Recent Post Errors")
         logs = api_request("/logs?limit=50")
         if logs and logs.get("success"):
             errors = [l for l in logs["logs"] if l.get("type") in ("error","warning") and "poster" in l.get("message","").lower() or "token" in l.get("message","").lower()][:5]
             if errors:
                 for e in errors:
-                    st.caption(f"⚠️ {e['created_at'][:16]} — {e['message'][:120]}")
+                    st.caption(f"{e['created_at'][:16]} — {e['message'][:120]}")
             else:
                 st.info("No recent posting errors")
 
 # Footer
 st.sidebar.markdown("---")
-st.sidebar.markdown("### 🚀 TikTok Video Collector")
+st.sidebar.markdown("### PostPilot")
 st.sidebar.markdown("Automated TikTok video collection and Facebook posting system")
 st.sidebar.markdown(f"**Last Updated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
