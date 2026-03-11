@@ -66,6 +66,41 @@ st.markdown("""<style>
 </style>""", unsafe_allow_html=True)
 
 # Helper functions
+def get_time_until_post(scheduled_time: str) -> str:
+    """Calculate time until scheduled post"""
+    if not scheduled_time:
+        return "Will be posted in queue order"
+    
+    try:
+        from datetime import datetime
+        scheduled_dt = datetime.fromisoformat(scheduled_time.replace('Z', '+00:00'))
+        now = datetime.now()
+        
+        if scheduled_dt <= now:
+            return "Posting now..."
+        
+        delta = scheduled_dt - now
+        total_minutes = int(delta.total_seconds() / 60)
+        
+        if total_minutes < 60:
+            return f"Will be posted in {total_minutes} minute{'s' if total_minutes != 1 else ''}"
+        elif total_minutes < 1440:  # Less than 24 hours
+            hours = total_minutes // 60
+            minutes = total_minutes % 60
+            if minutes == 0:
+                return f"Will be posted in {hours} hour{'s' if hours != 1 else ''}"
+            else:
+                return f"Will be posted in {hours}h {minutes}m"
+        else:
+            days = total_minutes // 1440
+            hours = (total_minutes % 1440) // 60
+            if hours == 0:
+                return f"Will be posted in {days} day{'s' if days != 1 else ''}"
+            else:
+                return f"Will be posted in {days}d {hours}h"
+    except:
+        return "Will be posted in queue order"
+
 def api_request(endpoint: str, method: str = "GET", data: dict = None):
     """Make API request"""
     try:
@@ -277,6 +312,28 @@ elif page == "Videos":
     st.title("Videos Management")
     st.caption("Manage your video pipeline from download to posting")
     
+    # Next posting indicator
+    posting_info = api_request("/scheduler/next-post")
+    if posting_info and posting_info.get("success"):
+        next_post_time = posting_info.get("next_post_time")
+        queue_count = posting_info.get("queue_count", 0)
+        
+        if next_post_time:
+            st.info(f"Next scheduled post: {next_post_time} ({queue_count} videos in queue)")
+        else:
+            st.info("No posts scheduled - videos will post in queue order")
+    
+    # Add refresh button for live updates
+    col_refresh, col_space = st.columns([1, 5])
+    with col_refresh:
+        if st.button("Refresh", key="refresh_videos"):
+            st.rerun()
+    
+    # Get queue status once for the whole page
+    queue_data = api_request("/tasks/status")
+    dl_queue = queue_data.get("queues", {}).get("downloader", {}) if queue_data else {}
+    dl_pending = dl_queue.get("pending", 0) if dl_queue else 0
+
     # Tabs for different video views
     tab1, tab2, tab3, tab4 = st.tabs(["Pending Downloads", "Pending Posts", "All Videos", "Task Status"])
     
@@ -288,10 +345,6 @@ elif page == "Videos":
             videos = pending_downloads.get("videos", [])
             
             if videos:
-                # Get queue status for ETA calculation
-                queue_data = api_request("/tasks/status")
-                dl_queue = queue_data.get("queues", {}).get("downloader", {})
-                dl_pending = dl_queue.get("pending", 0)
                 avg_download_sec = 45  # estimated per video
                 
                 # Initialize session state for checkboxes
@@ -393,11 +446,19 @@ elif page == "Videos":
                     tid = video.get('tiktok_id', 'Unknown')
                     author = video.get('author', 'Unknown')
                     
-                    # Checkbox for selection
-                    checked = st.checkbox(f"#{i+1} | @{author} — {tid}", 
+                    # Calculate posting time
+                    scheduled_time = video.get('scheduled_time')
+                    time_info = get_time_until_post(scheduled_time)
+                    
+                    # Checkbox for selection with time info
+                    checkbox_label = f"#{i+1} | @{author} — {tid}"
+                    checked = st.checkbox(checkbox_label, 
                                        key=f"post_check_{tid}",
                                        value=st.session_state.selected_posts.get(tid, False))
                     st.session_state.selected_posts[tid] = checked
+                    
+                    # Show posting time info
+                    st.caption(f"Scheduled: {time_info}")
                     
                     if checked:
                         with st.expander(f"Details for {tid}", expanded=False):
@@ -549,6 +610,18 @@ elif page == "Videos":
 
 elif page == "Tasks":
     st.title("Task Management")
+    
+    # Next posting indicator in Tasks too
+    posting_info = api_request("/scheduler/next-post")
+    if posting_info and posting_info.get("success"):
+        next_post_time = posting_info.get("next_post_time")
+        queue_count = posting_info.get("queue_count", 0)
+        interval_range = posting_info.get("interval_range", "")
+        
+        if next_post_time:
+            st.info(f"Next scheduled post: {next_post_time} ({queue_count} videos in queue)")
+        else:
+            st.info(f"Next post in {interval_range} ({queue_count} videos in queue order)")
 
     # --- Live stats banner ---
     stats      = api_request("/stats")
@@ -578,6 +651,14 @@ elif page == "Tasks":
                 st.success(result.get("message", "Scraping task queued"))
             else:
                 st.error("Failed to queue scraping task")
+
+        if st.button("Smart Unlimited Scraping", type="primary", use_container_width=True):
+            st.info("This will deeply scrape your keywords + find related content")
+            result = api_request("/tasks/scrape-unlimited", "POST")
+            if result and result.get("success"):
+                st.success(result.get("message", "Smart scraping task queued"))
+            else:
+                st.error("Failed to queue smart scraping task")
 
         if st.button("Download Pending Videos", use_container_width=True):
             result = api_request("/tasks/download-pending", "POST")

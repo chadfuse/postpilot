@@ -270,7 +270,7 @@ class Database:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    SELECT v.tiktok_id, v.file_path, v.caption, v.author, v.hashtags
+                    SELECT v.tiktok_id, v.file_path, v.caption, v.author, v.hashtags, v.scheduled_time
                     FROM videos v
                     WHERE v.downloaded = TRUE AND v.posted = FALSE
                     ORDER BY v.created_at ASC 
@@ -284,12 +284,55 @@ class Database:
                         'file_path': row[1],
                         'caption': row[2],
                         'author': row[3],
-                        'hashtags': json.loads(row[4]) if row[4] else []
+                        'hashtags': json.loads(row[4]) if row[4] else [],
+                        'scheduled_time': row[5]
                     })
                 return results
         except sqlite3.Error as e:
             self.log_error('database', f'Failed to get pending posts: {str(e)}')
             return []
+    
+    def get_next_scheduled_post(self) -> Optional[Dict]:
+        """Get the next scheduled video for posting"""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT tiktok_id, scheduled_time, created_at
+                    FROM videos 
+                    WHERE downloaded = TRUE AND posted = FALSE AND scheduled_time IS NOT NULL
+                    ORDER BY scheduled_time ASC 
+                    LIMIT 1
+                ''')
+                
+                row = cursor.fetchone()
+                if row:
+                    return {
+                        'tiktok_id': row[0],
+                        'scheduled_time': row[1],
+                        'created_at': row[2]
+                    }
+                return None
+        except sqlite3.Error as e:
+            self.log_error('database', f'Failed to get next scheduled post: {str(e)}')
+            return None
+    
+    def get_pending_posts_count(self) -> int:
+        """Get count of videos pending posting"""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT COUNT(*) 
+                    FROM videos 
+                    WHERE downloaded = TRUE AND posted = FALSE
+                ''')
+                
+                result = cursor.fetchone()
+                return result[0] if result else 0
+        except sqlite3.Error as e:
+            self.log_error('database', f'Failed to get pending posts count: {str(e)}')
+            return 0
     
     def clear_pending_downloads(self) -> int:
         """Delete all videos that are not yet downloaded"""

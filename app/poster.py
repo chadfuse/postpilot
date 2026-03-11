@@ -49,9 +49,9 @@ class FacebookPoster:
         
         # Add credit line
         if author:
-            description += f"Credit: @{author} on TikTok\n\n"
+            description += f"Credit: @{author} \n\n"
         else:
-            description += "Credit: TikTok creator\n\n"
+            description += "Credit: creator\n\n"
         
         # Add relevant hashtags
         if hashtags:

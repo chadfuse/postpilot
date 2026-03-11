@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from .database import Database
-from .scraper import scrape_keyword_task, scrape_all_keywords_task
+from .scraper import scrape_keyword_task, scrape_all_keywords_task, unlimited_scraping_task
 from .downloader import download_video_task, download_pending_videos_task, cleanup_files_task
 from .poster import post_video_task, post_pending_videos_task, get_facebook_stats_task
 
@@ -36,6 +36,29 @@ app.add_middleware(
 
 # Initialize database
 database = Database()
+
+# Embed scheduler into API server to save memory (no separate process needed)
+_scheduler_instance = None
+
+@app.on_event("startup")
+async def startup_event():
+    """Start the scheduler when the API server starts"""
+    global _scheduler_instance
+    try:
+        from .scheduler import TikTokScheduler
+        _scheduler_instance = TikTokScheduler()
+        _scheduler_instance.scheduler.start()
+        database.log_info('api', 'Embedded scheduler started with API server')
+    except Exception as e:
+        database.log_error('api', f'Failed to start embedded scheduler: {str(e)}')
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Stop the scheduler when the API server stops"""
+    global _scheduler_instance
+    if _scheduler_instance:
+        _scheduler_instance.scheduler.shutdown()
+        database.log_info('api', 'Embedded scheduler stopped')
 
 # Initialize Redis and RQ
 try:
@@ -357,10 +380,8 @@ async def schedule_single_video_post(tiktok_id: str, scheduled_at: str):
 
 @app.post("/tasks/post/{tiktok_id}")
 async def post_single_video(tiktok_id: str):
-    """Queue Facebook post for a specific downloaded video"""
+    """Post a specific downloaded video to Facebook (direct, no worker queue)"""
     try:
-        if not poster_queue:
-            raise HTTPException(status_code=503, detail="Redis/RQ not available")
         page_id, access_token = get_facebook_credentials()
         if not page_id or not access_token:
             raise HTTPException(status_code=400, detail="Facebook credentials not configured")
@@ -369,19 +390,25 @@ async def post_single_video(tiktok_id: str):
         video = next((v for v in all_pending if v['tiktok_id'] == tiktok_id), None)
         if not video:
             raise HTTPException(status_code=404, detail="Video not found, not downloaded, or already posted")
-        job = poster_queue.enqueue(
-            post_video_task,
+        
+        # Post directly instead of via worker (avoids memory crashes on low-RAM systems)
+        from .poster import FacebookPoster
+        poster = FacebookPoster(database, page_id, access_token)
+        result = poster.post_video_with_retry(
             tiktok_id=tiktok_id,
             video_path=video['file_path'],
             caption=video.get('caption', ''),
             author=video.get('author', ''),
-            hashtags=video.get('hashtags', []),
-            page_id=page_id,
-            access_token=access_token,
-            database_path=os.getenv('DATABASE_PATH', 'app/database.db')
+            hashtags=video.get('hashtags', [])
         )
-        database.log_info('api', f'Queued post for video: {tiktok_id}')
-        return {"success": True, "job_id": job.id, "message": f"Post queued for {tiktok_id}"}
+        
+        if result and result.get('success'):
+            database.log_info('api', f'Posted video to Facebook: {tiktok_id}')
+            return {"success": True, "message": f"Video {tiktok_id} posted to Facebook", "result": result}
+        else:
+            error_msg = result.get('message', 'Unknown error') if result else 'No response'
+            database.log_error('api', f'Failed to post {tiktok_id}: {error_msg}')
+            return {"success": False, "message": error_msg}
     except HTTPException:
         raise
     except Exception as e:
@@ -412,8 +439,8 @@ async def scrape_keyword(keyword: str, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/tasks/scrape-all")
-async def scrape_all_keywords(background_tasks: BackgroundTasks):
-    """Start scraping task for all keywords"""
+async def scrape_all_keywords():
+    """Scrape all keywords"""
     try:
         if not scraper_queue:
             raise HTTPException(status_code=503, detail="Redis/RQ not available")
@@ -422,14 +449,24 @@ async def scrape_all_keywords(background_tasks: BackgroundTasks):
             scrape_all_keywords_task,
             database_path=os.getenv('DATABASE_PATH', 'app/database.db')
         )
+        database.log_info('api', f'Scraping all keywords task queued: {job.id}')
+        return {"success": True, "job_id": job.id, "message": "Scraping task queued for all keywords"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/tasks/scrape-unlimited")
+async def unlimited_scraping():
+    """Advanced unlimited scraping with multiple strategies"""
+    try:
+        if not scraper_queue:
+            raise HTTPException(status_code=503, detail="Redis/RQ not available")
         
-        database.log_info('api', 'Queued scraping task for all keywords')
-        
-        return {
-            "success": True,
-            "job_id": job.id,
-            "message": "Scraping task queued for all keywords"
-        }
+        job = scraper_queue.enqueue(
+            unlimited_scraping_task,
+            database_path=os.getenv('DATABASE_PATH', 'app/database.db')
+        )
+        database.log_info('api', f'Unlimited scraping task queued: {job.id}')
+        return {"success": True, "job_id": job.id, "message": "Unlimited scraping task queued with multiple strategies"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -511,6 +548,107 @@ async def cleanup_old_files(background_tasks: BackgroundTasks, days_old: int = Q
         raise HTTPException(status_code=500, detail=str(e))
 
 # Statistics and Monitoring
+@app.get("/tasks/status")
+async def get_task_status():
+    """Get task queue status"""
+    try:
+        if not scraper_queue:
+            return {"success": True, "queues": {}, "workers": 0}
+        
+        from rq import Worker
+        
+        def queue_info(q):
+            if not q:
+                return {"pending": 0, "failed": 0}
+            try:
+                return {
+                    "pending": len(q),
+                    "failed": q.failed_job_registry.count
+                }
+            except Exception:
+                return {"pending": 0, "failed": 0}
+        
+        try:
+            workers = Worker.all(connection=redis_conn)
+            worker_count = len(workers)
+        except Exception:
+            worker_count = 0
+        
+        return {
+            "success": True,
+            "queues": {
+                "scraper": queue_info(scraper_queue),
+                "downloader": queue_info(downloader_queue),
+                "poster": queue_info(poster_queue)
+            },
+            "workers": worker_count
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/scheduler/next-post")
+async def get_next_post_info():
+    """Get information about the next scheduled post"""
+    try:
+        # Get next scheduled video
+        next_video = database.get_next_scheduled_post()
+        
+        if not next_video:
+            # No scheduled videos, get queue info
+            pending_count = database.get_pending_posts_count()
+            if pending_count > 0:
+                # Read interval settings from config file directly
+                config = get_config()
+                min_interval = config.get('MIN_POST_INTERVAL', 10)
+                max_interval = config.get('MAX_POST_INTERVAL', 30)
+                
+                return {
+                    "success": True,
+                    "next_post_time": None,
+                    "queue_count": pending_count,
+                    "mode": "queue_order",
+                    "interval_range": f"{min_interval}-{max_interval} minutes",
+                    "message": f"Next post in {min_interval}-{max_interval} minutes (queue order)"
+                }
+            else:
+                return {
+                    "success": True,
+                    "next_post_time": None,
+                    "queue_count": 0,
+                    "mode": "no_content",
+                    "message": "No videos ready to post"
+                }
+        
+        # Has scheduled video
+        scheduled_time = next_video.get('scheduled_time')
+        if scheduled_time:
+            try:
+                scheduled_dt = datetime.fromisoformat(scheduled_time.replace('Z', '+00:00'))
+                formatted_time = scheduled_dt.strftime('%Y-%m-%d %H:%M:%S')
+            except Exception:
+                formatted_time = scheduled_time
+            
+            pending_count = database.get_pending_posts_count()
+            return {
+                "success": True,
+                "next_post_time": formatted_time,
+                "queue_count": pending_count,
+                "mode": "scheduled",
+                "tiktok_id": next_video.get('tiktok_id'),
+                "message": f"Scheduled for {formatted_time}"
+            }
+        
+        return {
+            "success": True,
+            "next_post_time": None,
+            "queue_count": 0,
+            "mode": "unknown",
+            "message": "Unable to determine next post time"
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/stats")
 async def get_system_stats():
     """Get system statistics"""
@@ -539,41 +677,6 @@ async def get_system_stats():
             "database": stats,
             "config": config,
             "queue": queue_info,
-            "timestamp": datetime.now().isoformat()
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/tasks/status")
-async def get_task_status():
-    """Get current task queue status and ETAs"""
-    try:
-        from rq.job import Job
-        status = {}
-        for name, q in [('scraper', scraper_queue), ('downloader', downloader_queue), ('poster', poster_queue), ('cleanup', cleanup_queue)]:
-            if not q:
-                continue
-            pending = []
-            for job_id in q.get_job_ids():
-                try:
-                    job = Job.fetch(job_id, connection=redis_conn)
-                    pending.append({
-                        'id': job.id[:8],
-                        'func': job.func_name,
-                        'created_at': job.created_at.isoformat() if job.created_at else None,
-                        'status': job.get_status(),
-                        'timeout': job.timeout
-                    })
-                except:
-                    continue
-            status[name] = {
-                'pending': len(q),
-                'failed': q.failed_job_registry.count,
-                'jobs': pending[:5]  # show up to 5 jobs
-            }
-        return {
-            "success": True,
-            "queues": status,
             "timestamp": datetime.now().isoformat()
         }
     except Exception as e:

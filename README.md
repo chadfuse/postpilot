@@ -125,8 +125,36 @@ uvicorn app.api:app --reload
 # Start worker (in separate terminal)
 python app/worker.py
 
+# Start scheduler (CRITICAL - in separate terminal)
+python run_scheduler.py
+
 # Start dashboard (in separate terminal)
 streamlit run dashboard/streamlit_app.py
+```
+
+### ⚠️ CRITICAL: Scheduler Status
+
+The **scheduler is the most critical component** of this application. It handles:
+- **Automated posting** with min-max intervals
+- **Daily post limits** (5-11 posts per day)
+- **Random posting patterns** for natural behavior
+- **Queue management** and timing
+
+**Always verify the scheduler is running:**
+```bash
+# Check if scheduler process is running
+ps aux | grep "run_scheduler.py" | grep -v grep
+
+# Check posting queue status
+curl http://localhost:8000/tasks/status
+
+# Monitor scheduler logs
+tail -f logs/scheduler.log
+```
+
+**If scheduler stops, posting will halt!** Restart immediately:
+```bash
+python run_scheduler.py
 ```
 
 ## ⚙️ Configuration
@@ -281,6 +309,30 @@ The `render.yaml` file contains the complete Render configuration:
 
 ## 📈 Monitoring
 
+### ⚠️ CRITICAL: Scheduler Monitoring
+
+**The scheduler MUST be monitored constantly:**
+
+```bash
+# Check scheduler process (should always be running)
+ps aux | grep "run_scheduler.py" | grep -v grep
+
+# Check posting queue status
+curl http://localhost:8000/tasks/status | jq '.queues.poster'
+
+# Monitor scheduler activity
+tail -f logs/scheduler.log
+
+# Dashboard monitoring
+# Visit: http://localhost:8501 → Tasks tab → Queue Status
+```
+
+**Scheduler Health Indicators:**
+- ✅ Process running: `python run_scheduler.py`
+- ✅ Queue working: Tasks being processed
+- ✅ Posts happening: Daily stats increasing
+- ❌ **ALARM**: No scheduler process = NO POSTING
+
 ### System Health
 
 - **API Health Check**: `/health` endpoint
@@ -336,11 +388,51 @@ The `render.yaml` file contains the complete Render configuration:
 
 This project is licensed under the MIT License - see the LICENSE file for details.
 
+## 🆘 Troubleshooting
+
+### ⚠️ Scheduler Issues (CRITICAL)
+
+**Problem: No posts happening**
+```bash
+# Check if scheduler is running
+ps aux | grep "run_scheduler.py" | grep -v grep
+
+# If not running, restart immediately:
+python run_scheduler.py
+```
+
+**Problem: Posts not following min-max intervals**
+- Check Settings page for correct values
+- Restart scheduler after changing settings
+- Verify logs for interval calculations
+
+**Problem: Daily post limits not working**
+- Check MIN_POSTS_PER_DAY and MAX_POSTS_PER_DAY settings
+- Monitor daily stats in Dashboard
+- Review scheduler logs for limit checks
+
+### Common Issues
+
+**Problem: Videos not downloading**
+- Check TikTok API credentials
+- Verify scraper queue status
+- Check network connectivity
+
+**Problem: Facebook posting failed**
+- Verify Facebook token validity
+- Check Facebook page permissions
+- Review poster logs for API errors
+
+**Problem: Dashboard not loading**
+- Restart Streamlit: `streamlit run dashboard/streamlit_app.py`
+- Check API server status: `curl http://localhost:8000/health`
+- Verify Redis connection
+
 ## 🆘 Support
 
 For issues and questions:
 
-1. Check the troubleshooting section
+1. Check the troubleshooting section above
 2. Review system logs
 3. Create an issue on GitHub
 4. Contact the development team

@@ -1,6 +1,7 @@
 import os
-import time
 import json
+import time
+import random
 import asyncio
 from datetime import datetime, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -32,10 +33,12 @@ class TikTokScheduler:
                 return json.load(f)
         except:
             return {
+                'MIN_POSTS_PER_DAY': 5,
                 'MAX_POSTS_PER_DAY': 15,
-                'SCRAPE_INTERVAL': 30,  # minutes
-                'POST_INTERVAL': 60,     # minutes
-                'CLEANUP_INTERVAL': 24   # hours
+                'MIN_POST_INTERVAL': 10,  # minutes
+                'MAX_POST_INTERVAL': 30,  # minutes
+                'SCRAPE_INTERVAL': 30,    # minutes
+                'CLEANUP_INTERVAL': 24    # hours
             }
     
     def _setup_scheduler(self):
@@ -61,10 +64,10 @@ class TikTokScheduler:
                 max_instances=1
             )
             
-            # Post to Facebook every POST_INTERVAL minutes during business hours
+            # Post to Facebook check every 5 minutes (actual posting uses min-max intervals)
             self.scheduler.add_job(
                 func=self._post_to_facebook,
-                trigger=IntervalTrigger(minutes=self.config.get('POST_INTERVAL', 60)),
+                trigger=IntervalTrigger(minutes=5),
                 id='post_facebook',
                 name='Post to Facebook',
                 replace_existing=True,
@@ -199,21 +202,37 @@ class TikTokScheduler:
     async def _post_to_facebook(self):
         """Post to Facebook task"""
         try:
-            # Check daily post limit
+            # Check daily post limits (min-max)
             stats = self.database.get_system_stats()
             posts_today = stats['today']['posted']
+            min_posts = self.config.get('MIN_POSTS_PER_DAY', 5)
             max_posts = self.config.get('MAX_POSTS_PER_DAY', 15)
             
+            # Don't post if we've reached max for today
             if posts_today >= max_posts:
                 self.database.log_info('scheduler', f'Daily post limit reached: {posts_today}/{max_posts}')
                 return
             
-            # Check posting interval
-            last_post = self._get_last_run_time('posting')
-            post_interval = self.config.get('POST_INTERVAL', 60)
+            # Check if we should post more today (target minimum)
+            if posts_today >= min_posts:
+                # We've hit minimum, now check if we want to post more (random chance)
+                remaining_capacity = max_posts - posts_today
+                if remaining_capacity > 0:
+                    # 50% chance to post more if we haven't hit max
+                    if random.random() > 0.5:
+                        self.database.log_info('scheduler', f'Minimum posts reached ({posts_today}), skipping additional posting')
+                        return
             
-            if last_post and (datetime.now() - last_post).total_seconds() < (post_interval * 60):
-                return
+            # Check posting interval (use min-max range)
+            last_post = self._get_last_run_time('posting')
+            min_interval = self.config.get('MIN_POST_INTERVAL', 10)  # Default 10 minutes
+            max_interval = self.config.get('MAX_POST_INTERVAL', 30)  # Default 30 minutes
+            
+            if last_post:
+                # Use random interval within min-max range
+                last_interval = (datetime.now() - last_post).total_seconds() / 60
+                if last_interval < min_interval:
+                    return  # Too soon since last post
             
             # Get pending videos
             pending_videos = self.database.get_pending_posts(1)
@@ -222,27 +241,42 @@ class TikTokScheduler:
             
             video = pending_videos[0]
             
-            # Check Facebook credentials
+            # Check Facebook credentials from config.json first, then env vars
+            config_path = os.getenv('CONFIG_PATH', 'config/config.json')
             page_id = os.getenv('FACEBOOK_PAGE_ID')
             access_token = os.getenv('FACEBOOK_ACCESS_TOKEN')
+            
+            if not page_id or not access_token:
+                try:
+                    with open(config_path, 'r') as f:
+                        cfg = json.load(f)
+                    page_id = cfg.get('FACEBOOK_PAGE_ID', page_id)
+                    access_token = cfg.get('FACEBOOK_ACCESS_TOKEN', access_token)
+                except Exception:
+                    pass
             
             if not page_id or not access_token:
                 self.database.log_warning('scheduler', 'Facebook credentials not configured')
                 return
             
             try:
-                # In production, this would be: queue.enqueue(post_pending_videos_task, ...)
-                # For demo purposes, we'll simulate success
-                facebook_post_id = f"fb_{video['tiktok_id']}_{int(time.time())}"
-                self.database.update_video_posted(video['tiktok_id'], facebook_post_id)
+                from .poster import FacebookPoster
+                poster = FacebookPoster(self.database, page_id, access_token)
+                result = poster.post_video_with_retry(
+                    tiktok_id=video['tiktok_id'],
+                    video_path=video.get('file_path', ''),
+                    caption=video.get('caption', ''),
+                    author=video.get('author', ''),
+                    hashtags=video.get('hashtags', [])
+                )
                 
-                # Update last run time
-                self._set_last_run_time('posting', datetime.now())
-                
-                # Update daily stats
-                self.database.update_daily_stats(posted=1)
-                
-                self.database.log_info('scheduler', f'Would post video to Facebook: {video["tiktok_id"]}')
+                if result and result.get('success'):
+                    self.database.update_daily_stats(posted=1)
+                    self._set_last_run_time('posting', datetime.now())
+                    self.database.log_info('scheduler', f'Posted video to Facebook: {video["tiktok_id"]} (post_id: {result.get("facebook_post_id", "unknown")})')
+                else:
+                    error_msg = result.get('message', 'Unknown error') if result else 'No response from poster'
+                    self.database.log_error('scheduler', f'Failed to post {video["tiktok_id"]}: {error_msg}')
                 
             except Exception as e:
                 self.database.log_error('scheduler', f'Failed to post {video["tiktok_id"]}: {str(e)}')
