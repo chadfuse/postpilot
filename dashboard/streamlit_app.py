@@ -1,5 +1,14 @@
 import os
 import streamlit as st
+
+# Page configuration — MUST be the first Streamlit command
+st.set_page_config(
+    page_title="PostPilot - TikTok to Facebook Automation",
+    page_icon="PP",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
 import requests
 import json
 import pandas as pd
@@ -7,17 +16,25 @@ from datetime import datetime, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from api_cache import cached_api_request, invalidate_cache
+from keywords_bulk import render_bulk_input_section, add_keywords_bulk, render_bulk_results
 
-# Configuration — env var takes priority (Render), then secrets.toml, then local default
-API_BASE_URL = os.getenv("API_BASE_URL") or st.secrets.get("API_BASE_URL", "http://localhost:8000")
+# Configuration — env var takes priority, then local default
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
 
-# Page configuration
-st.set_page_config(
-    page_title="PostPilot - TikTok to Facebook Automation",
-    page_icon="PP",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# Initialize session state variables
+if 'selected_downloads' not in st.session_state:
+    st.session_state.selected_downloads = {}
+if 'selected_posts' not in st.session_state:
+    st.session_state.selected_posts = {}
+if 'api_cache' not in st.session_state:
+    st.session_state.api_cache = {}
+if 'api_cache_timestamps' not in st.session_state:
+    st.session_state.api_cache_timestamps = {}
+if 'confirm_clear_dl' not in st.session_state:
+    st.session_state.confirm_clear_dl = False
+if 'confirm_clear_post' not in st.session_state:
+    st.session_state.confirm_clear_post = False
 
 # Clean Light Theme
 st.markdown('<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">', unsafe_allow_html=True)
@@ -101,31 +118,72 @@ def get_time_until_post(scheduled_time: str) -> str:
     except:
         return "Will be posted in queue order"
 
-def api_request(endpoint: str, method: str = "GET", data: dict = None):
-    """Make API request"""
+def api_request(endpoint: str, method: str = "GET", data: dict = None, ttl: int = 30):
+    """Make API request with caching"""
     try:
-        url = f"{API_BASE_URL}{endpoint}"
-        
-        if method == "GET":
-            response = requests.get(url, timeout=10)
-        elif method == "POST":
-            response = requests.post(url, json=data, timeout=10)
-        elif method == "PUT":
-            response = requests.put(url, json=data, timeout=10)
-        elif method == "DELETE":
-            response = requests.delete(url, timeout=10)
-        else:
-            return None
-        
-        if response.status_code == 200:
-            return response.json()
-        else:
-            st.error(f"API Error: {response.status_code} - {response.text}")
-            return None
-            
+        return cached_api_request(endpoint, method, data, ttl)
     except requests.exceptions.RequestException as e:
         st.error(f"Connection Error: {str(e)}")
         return None
+
+def show_system_alerts():
+    """Show global error/warning banners at the top of every page"""
+    alerts = []
+    
+    # Check API health
+    try:
+        resp = requests.get(f"{API_BASE_URL}/health", timeout=3)
+        if resp.status_code != 200:
+            alerts.append(("error", "API server is not responding correctly"))
+    except requests.exceptions.ConnectionError:
+        st.error("**API server is offline.** Start it with `start_optimized.sh` or check port 8000.")
+        return
+    except Exception:
+        st.error("**Cannot reach API server.**")
+        return
+    
+    # Check task status for issues
+    status = api_request("/tasks/status", ttl=15)
+    if status and status.get("success"):
+        queues = status.get("queues", {})
+        dl_pending = queues.get("downloader", {}).get("pending", 0)
+        post_pending = queues.get("poster", {}).get("pending", 0)
+        
+        if post_pending > 0 and dl_pending == 0:
+            # Videos marked as ready to post — check if files actually exist
+            pending_posts = api_request("/videos/pending-post?limit=5", ttl=15)
+            if pending_posts and pending_posts.get("videos"):
+                import os
+                missing = 0
+                for v in pending_posts["videos"]:
+                    fp = v.get("file_path", "")
+                    if fp and not os.path.exists(fp):
+                        missing += 1
+                if missing > 0:
+                    alerts.append(("warning", f"{post_pending} videos are queued to post but video files are missing. Click **Clear Pending Posts** on the Videos tab, then re-download."))
+    
+    # Check recent errors from logs
+    try:
+        resp = requests.get(f"{API_BASE_URL}/logs/recent-errors", timeout=3)
+        if resp.status_code == 200:
+            log_data = resp.json()
+            if log_data.get("errors"):
+                latest = log_data["errors"][0]
+                alerts.append(("error", f"Recent error: {latest.get('message', 'Unknown error')}"))
+    except Exception:
+        pass  # /logs/recent-errors may not exist yet — that's fine
+    
+    # Check Facebook config
+    fb = api_request("/facebook/settings", ttl=60)
+    if fb and not fb.get("configured", True):
+        alerts.append(("warning", "Facebook credentials are not configured. Go to **Settings** to set them up."))
+    
+    # Display alerts
+    for level, msg in alerts:
+        if level == "error":
+            st.error(msg)
+        elif level == "warning":
+            st.warning(msg)
 
 def format_number(num: int) -> str:
     """Format large numbers"""
@@ -157,17 +215,15 @@ st.sidebar.markdown("---")
 
 # Vertical tab navigation with Font Awesome icons
 NAV_ITEMS = [
-    ("Dashboard",  "fa-solid fa-gauge-high"),
-    ("Keywords",   "fa-solid fa-hashtag"),
     ("Videos",     "fa-solid fa-film"),
+    ("Keywords",   "fa-solid fa-hashtag"),
     ("Tasks",      "fa-solid fa-list-check"),
-    ("Logs",       "fa-solid fa-scroll"),
     ("Settings",   "fa-solid fa-gear"),
     ("Facebook",   "fa-brands fa-facebook"),
 ]
 
 if "page" not in st.session_state:
-    st.session_state.page = "Dashboard"
+    st.session_state.page = "Videos"
 
 for name, icon in NAV_ITEMS:
     is_active = st.session_state.page == name
@@ -180,6 +236,17 @@ page = st.session_state.page
 
 # System Health in sidebar
 st.sidebar.markdown("---")
+
+# Cache control
+with st.sidebar.expander("Cache Control", expanded=False):
+    if st.button("Clear All Caches", key="clear_cache", use_container_width=True):
+        invalidate_cache()
+        st.success("All caches cleared!")
+        st.rerun()
+    
+    st.caption("Reduces API calls and prevents rate limiting")
+
+st.sidebar.markdown("---")
 health = api_request("/health")
 if health:
     status = health.get('status', 'unknown')
@@ -191,124 +258,11 @@ if health:
     col_h1.caption(f"DB: {health.get('database', '?')}")
     col_h2.caption(f"Redis: {health.get('redis', '?')}")
 
+# Global alerts — shown at top of every page
+show_system_alerts()
+
 # Main content
-if page == "Dashboard":
-    st.title("System Dashboard")
-    st.caption("Real-time monitoring of your TikTok → Facebook automation")
-    
-    # Get system stats
-    stats = api_request("/stats")
-    if stats and stats.get("success"):
-        db_stats = stats.get("database", {})
-        
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("Total Videos", format_number(db_stats.get('overall', {}).get('total_videos', 0)))
-        with col2:
-            st.metric("Downloaded Today", format_number(db_stats.get('today', {}).get('downloaded', 0)))
-        with col3:
-            st.metric("Posted Today", format_number(db_stats.get('today', {}).get('posted', 0)))
-        with col4:
-            st.metric("Active Keywords", format_number(db_stats.get('overall', {}).get('keywords', 0)))
-        
-        st.markdown("---")
-        
-        # Charts
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.subheader("Today's Activity")
-            today_data = db_stats.get('today', {})
-            
-            fig = go.Figure(data=[
-                go.Bar(name='Scraped', x=['Scraped', 'Downloaded', 'Posted'], 
-                      y=[today_data.get('scraped', 0), today_data.get('downloaded', 0), today_data.get('posted', 0)],
-                      marker_color=['#1f77b4', '#ff7f0e', '#2ca02c'])
-            ])
-            fig.update_layout(title="Today's Video Processing", yaxis_title="Count")
-            st.plotly_chart(fig, use_container_width=True)
-        
-        with col2:
-            st.subheader("Overall Progress")
-            overall_data = db_stats.get('overall', {})
-            
-            fig = go.Figure(data=[
-                go.Pie(labels=['Downloaded', 'Not Downloaded', 'Posted'],
-                       values=[overall_data.get('downloaded', 0), 
-                              overall_data.get('total_videos', 0) - overall_data.get('downloaded', 0),
-                              overall_data.get('posted', 0)],
-                       hole=0.3)
-            ])
-            fig.update_layout(title="Video Processing Status")
-            st.plotly_chart(fig, use_container_width=True)
-        
-        # Queue status
-        if stats.get("queue"):
-            st.subheader("Task Queue Status")
-            queue_data = stats.get("queue", {})
-            
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("Pending", queue_data.get("pending_jobs", 0))
-            with col2:
-                st.metric("Failed", queue_data.get("failed_jobs", 0))
-            with col3:
-                st.metric("Scheduled", queue_data.get("scheduled_jobs", 0))
-            with col4:
-                st.metric("Started", queue_data.get("started_jobs", 0))
-
-elif page == "Keywords":
-    st.title("Keywords Management")
-    
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        st.subheader("Current Keywords")
-        
-        keywords_data = api_request("/keywords")
-        if keywords_data and keywords_data.get("success"):
-            keywords = keywords_data.get("keywords", [])
-            
-            if keywords:
-                df = pd.DataFrame(keywords, columns=["Keyword"])
-                st.dataframe(df, use_container_width=True)
-            else:
-                st.info("No keywords configured yet")
-    
-    with col2:
-        st.subheader("Add Keyword")
-        
-        new_keyword = st.text_input("Enter keyword:")
-        if st.button("Add Keyword", type="primary"):
-            if new_keyword.strip():
-                result = api_request("/keywords", "POST", {"keyword": new_keyword.strip()})
-                if result and result.get("success"):
-                    st.success(result.get("message", "Keyword added successfully"))
-                    st.rerun()
-                else:
-                    st.error("Failed to add keyword")
-            else:
-                st.error("Please enter a keyword")
-        
-        st.markdown("---")
-        
-        st.subheader("Remove Keyword")
-        
-        keywords_data = api_request("/keywords")
-        if keywords_data and keywords_data.get("success"):
-            keywords = keywords_data.get("keywords", [])
-            
-            if keywords:
-                keyword_to_remove = st.selectbox("Select keyword to remove:", keywords)
-                if st.button("Remove Keyword", type="secondary"):
-                    result = api_request(f"/keywords/{keyword_to_remove}", "DELETE")
-                    if result and result.get("success"):
-                        st.success(result.get("message", "Keyword removed successfully"))
-                        st.rerun()
-                    else:
-                        st.error("Failed to remove keyword")
-
-elif page == "Videos":
+if page == "Videos":
     st.title("Videos Management")
     st.caption("Manage your video pipeline from download to posting")
     
@@ -340,16 +294,13 @@ elif page == "Videos":
     with tab1:
         st.subheader("Videos Pending Download")
         
-        pending_downloads = api_request("/videos/pending-download?limit=500")
+        pending_downloads = api_request("/videos/pending-download?limit=100")
+        videos = []
         if pending_downloads and pending_downloads.get("success"):
             videos = pending_downloads.get("videos", [])
             
             if videos:
                 avg_download_sec = 45  # estimated per video
-                
-                # Initialize session state for checkboxes
-                if 'selected_downloads' not in st.session_state:
-                    st.session_state.selected_downloads = {}
                 
                 st.subheader("Select videos to download:")
                 for i, video in enumerate(videos):
@@ -380,9 +331,10 @@ elif page == "Videos":
                             
                             with col2:
                                 if st.button("Download Now", key=f"download_{tid}", use_container_width=True):
-                                    result = api_request(f"/tasks/download/{tid}", "POST")
+                                    # Download single video via bulk download endpoint
+                                    result = api_request("/tasks/download-pending?limit=1", "POST")
                                     if result and result.get("success"):
-                                        st.success("Queued")
+                                        st.success("Downloaded")
                                         st.rerun()
                                     else:
                                         st.error("Failed")
@@ -432,14 +384,11 @@ elif page == "Videos":
     with tab2:
         st.subheader("Videos Pending Posting")
         
-        pending_posts = api_request("/videos/pending-post?limit=500")
+        pending_posts = api_request("/videos/pending-post?limit=30")
         if pending_posts and pending_posts.get("success"):
             videos = pending_posts.get("videos", [])
             
             if videos:
-                # Initialize session state for checkboxes
-                if 'selected_posts' not in st.session_state:
-                    st.session_state.selected_posts = {}
                 
                 st.subheader("Select videos to post:")
                 for i, video in enumerate(videos):
@@ -608,6 +557,90 @@ elif page == "Videos":
         else:
             st.error("Failed to load task status")
 
+elif page == "Keywords":
+    st.title("Keywords Management")
+    
+    # Bulk Input Section
+    keywords_to_add = render_bulk_input_section()
+    
+    if keywords_to_add:
+        # Process bulk addition
+        success_count, failed_count, failed_keywords = add_keywords_bulk(keywords_to_add, api_request)
+        render_bulk_results(success_count, failed_count, failed_keywords)
+        
+        if success_count > 0:
+            st.rerun()
+    
+    st.markdown("---")
+    
+    # Manual keyword management
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        st.subheader("Current Keywords")
+        
+        keywords_data = api_request("/keywords")
+        if keywords_data and keywords_data.get("success"):
+            keywords = keywords_data.get("keywords", [])
+            
+            if keywords:
+                df = pd.DataFrame(keywords, columns=["Keyword"])
+                st.dataframe(df, use_container_width=True)
+                
+                # Export to CSV
+                st.markdown("---")
+                st.subheader("📤 Export Keywords")
+                
+                csv = pd.DataFrame({"keyword": keywords}).to_csv(index=False)
+                st.download_button(
+                    label="Download Keywords as CSV",
+                    data=csv,
+                    file_name="keywords.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+            else:
+                st.info("No keywords configured yet")
+    
+    with col2:
+        st.subheader("Add Single Keyword")
+        
+        new_keyword = st.text_input("Enter keyword:")
+        if st.button("Add Keyword", type="primary"):
+            if new_keyword.strip():
+                result = api_request("/keywords", "POST", {"keyword": new_keyword.strip()})
+                if result and result.get("success"):
+                    st.success(result.get("message", "Keyword added successfully"))
+                    st.rerun()
+                else:
+                    # Better error handling
+                    if result and "already exists" in str(result):
+                        st.warning("Keyword already exists")
+                    elif result and "too long" in str(result):
+                        st.error("Keyword too long (max 100 characters)")
+                    else:
+                        st.error("Failed to add keyword")
+            else:
+                st.error("Please enter a keyword")
+        
+        st.markdown("---")
+        
+        st.subheader("Remove Keyword")
+        
+        keywords_data = api_request("/keywords")
+        if keywords_data and keywords_data.get("success"):
+            keywords = keywords_data.get("keywords", [])
+            
+            if keywords:
+                keyword_to_remove = st.selectbox("Select keyword to remove:", keywords)
+                if st.button("Remove Keyword", type="secondary"):
+                    result = api_request(f"/keywords/{keyword_to_remove}", "DELETE")
+                    if result and result.get("success"):
+                        st.success(result.get("message", "Keyword removed successfully"))
+                        st.rerun()
+                    else:
+                        st.error("Failed to remove keyword")
+
 elif page == "Tasks":
     st.title("Task Management")
     
@@ -626,7 +659,7 @@ elif page == "Tasks":
     # --- Live stats banner ---
     stats      = api_request("/stats")
     dl_data    = api_request("/videos/pending-download?limit=200")
-    post_data  = api_request("/videos/pending-post?limit=200")
+    post_data  = api_request("/videos/pending-post?limit=30")
 
     db_overall    = stats.get("database", {}).get("overall", {}) if stats else {}
     pending_dl    = len(dl_data.get("videos", []))   if dl_data   else 0
@@ -820,7 +853,7 @@ elif page == "Settings":
                 "max_post_interval":    post_range[1],
             }
             
-            result = api_request("/config", "PUT", settings_data)
+            result = api_request("/config", "POST", settings_data)
             if result and result.get("success"):
                 st.success("Settings saved successfully")
                 st.rerun()

@@ -84,13 +84,17 @@ class TikTokScraper:
             if not tiktok_id:
                 return None
 
-            # Use direct play URL — no watermark, ready for download
-            video_url = item.get('play', '') or item.get('hdplay', '')
-            if not video_url:
+            # Verify a playable URL exists (needed to confirm video is valid)
+            play_url = item.get('play', '') or item.get('hdplay', '')
+            if not play_url:
                 return None
 
             caption = item.get('title', '')
             author = item.get('author', {}).get('unique_id', '') or item.get('author', {}).get('nickname', '')
+
+            # Store a permanent TikTok page URL instead of the expiring CDN URL.
+            # The downloader will resolve a fresh CDN URL at download time.
+            video_url = f"https://www.tiktok.com/@{author}/video/{tiktok_id}"
 
             # Extract hashtags from caption
             hashtags = re.findall(r'#(\w+)', caption)

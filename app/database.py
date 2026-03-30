@@ -171,15 +171,15 @@ class Database:
             return False
     
     def update_video_posted(self, tiktok_id: str, facebook_post_id: str) -> bool:
-        """Mark video as posted"""
+        """Mark video as posted and store facebook_post_id"""
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
                     UPDATE videos 
-                    SET posted = TRUE, updated_at = CURRENT_TIMESTAMP 
+                    SET posted = TRUE, facebook_post_id = ?, posted_time = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP 
                     WHERE tiktok_id = ?
-                ''', (tiktok_id,))
+                ''', (facebook_post_id, tiktok_id))
                 videos_updated = cursor.rowcount
                 
                 cursor.execute('''

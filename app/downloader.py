@@ -101,8 +101,39 @@ class VideoDownloader:
                     pass
             return {'success': False, 'message': f'yt-dlp download failed: {str(e)}'}
 
+    def _is_url_expired(self, url: str) -> bool:
+        """Check if a TikTok CDN URL has expired based on its embedded timestamp"""
+        import re
+        # CDN URLs contain a hex timestamp in the path, e.g. /69bec59c/
+        match = re.search(r'/([0-9a-f]{8})/', url)
+        if match:
+            try:
+                expiry = int(match.group(1), 16)
+                return time.time() > expiry
+            except ValueError:
+                pass
+        return False
+
+    def _refresh_video_url(self, tiktok_id: str) -> Optional[str]:
+        """Re-resolve a fresh download URL for a video via tikwm API"""
+        try:
+            tiktok_url = f"https://www.tiktok.com/@user/video/{tiktok_id}"
+            resp = requests.post(TIKWM_API, data={'url': tiktok_url, 'hd': 1}, timeout=20)
+            resp.raise_for_status()
+            data = resp.json()
+
+            if data.get('code') == 0:
+                play_url = data['data'].get('hdplay') or data['data'].get('play')
+                if play_url:
+                    self.database.log_info('downloader', f'Refreshed URL for {tiktok_id}')
+                    return play_url
+            return None
+        except Exception as e:
+            self.database.log_error('downloader', f'Failed to refresh URL for {tiktok_id}: {str(e)}')
+            return None
+
     def download_video(self, tiktok_id: str, video_url: str) -> Dict[str, any]:
-        """Download a single video — tries tikwm first, falls back to yt-dlp"""
+        """Download a single video — always resolves a fresh CDN URL at download time"""
         try:
             file_path = os.path.join(self.download_path, f"{tiktok_id}.mp4")
             
@@ -112,34 +143,41 @@ class VideoDownloader:
                 self.database.update_video_downloaded(tiktok_id, file_path)
                 return {'success': True, 'tiktok_id': tiktok_id, 'file_path': file_path, 'message': 'Video already exists'}
             
-            # Route download based on URL type
-            is_direct_url = video_url.startswith('https://v') or 'tiktokcdn' in video_url or 'tiktokv' in video_url
-            if is_direct_url:
-                # Direct CDN URL from tikwm scraper — download immediately
-                result = self._download_direct_url(tiktok_id, video_url)
-            else:
-                # TikTok page URL — resolve via tikwm API
+            # STEP 1: Always resolve a fresh CDN URL via tikwm (never trust stored CDN URLs)
+            fresh_url = self._refresh_video_url(tiktok_id)
+            if fresh_url:
+                result = self._download_direct_url(tiktok_id, fresh_url)
+                if result['success']:
+                    return self._finalize_download(tiktok_id, result)
+            
+            # STEP 2: If stored URL is a TikTok page URL, try tikwm resolve
+            if 'tiktok.com' in video_url and '/video/' in video_url:
                 result = self._download_via_tikwm(tiktok_id, video_url)
+                if result['success']:
+                    return self._finalize_download(tiktok_id, result)
             
-            if not result['success']:
-                self.database.log_warning('downloader', f'Primary download failed for {tiktok_id}: {result["message"]}, trying yt-dlp')
-                result = self._download_via_ytdlp(tiktok_id, video_url)
-            
+            # STEP 3: Last resort — yt-dlp with a constructed TikTok page URL
+            tiktok_page_url = video_url if 'tiktok.com' in video_url else f"https://www.tiktok.com/@user/video/{tiktok_id}"
+            result = self._download_via_ytdlp(tiktok_id, tiktok_page_url)
             if result['success']:
-                if self.database.update_video_downloaded(tiktok_id, result['file_path']):
-                    self.database.log_info('downloader', f"Downloaded {tiktok_id} via {result.get('method', 'unknown')} ({result['file_size']} bytes)")
-                    return {'success': True, 'tiktok_id': tiktok_id, 'file_path': result['file_path'],
-                            'file_size': result['file_size'], 'message': 'Download successful'}
-                else:
-                    os.remove(result['file_path'])
-                    return {'success': False, 'tiktok_id': tiktok_id, 'message': 'Download OK but DB update failed'}
-            else:
-                self.database.log_error('downloader', f"All methods failed for {tiktok_id}: {result['message']}")
-                return {'success': False, 'tiktok_id': tiktok_id, 'message': result['message']}
+                return self._finalize_download(tiktok_id, result)
+            
+            self.database.log_error('downloader', f"All methods failed for {tiktok_id}: {result['message']}")
+            return {'success': False, 'tiktok_id': tiktok_id, 'message': result['message']}
                 
         except Exception as e:
             self.database.log_error('downloader', f'Unexpected error downloading {tiktok_id}: {str(e)}')
             return {'success': False, 'tiktok_id': tiktok_id, 'message': str(e)}
+
+    def _finalize_download(self, tiktok_id: str, result: Dict) -> Dict[str, any]:
+        """Update DB after a successful download"""
+        if self.database.update_video_downloaded(tiktok_id, result['file_path']):
+            self.database.log_info('downloader', f"Downloaded {tiktok_id} via {result.get('method', 'unknown')} ({result['file_size']} bytes)")
+            return {'success': True, 'tiktok_id': tiktok_id, 'file_path': result['file_path'],
+                    'file_size': result['file_size'], 'message': 'Download successful'}
+        else:
+            os.remove(result['file_path'])
+            return {'success': False, 'tiktok_id': tiktok_id, 'message': 'Download OK but DB update failed'}
     
     def download_video_with_retry(self, tiktok_id: str, video_url: str) -> Dict[str, any]:
         """Download video with retry logic"""

@@ -6,17 +6,43 @@ from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-import redis
-from rq import Queue
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
 
+# Import database immediately (always needed)
 from .database import Database
-from .scraper import scrape_keyword_task, scrape_all_keywords_task, unlimited_scraping_task
-from .downloader import download_video_task, download_pending_videos_task, cleanup_files_task
-from .poster import post_video_task, post_pending_videos_task, get_facebook_stats_task
+from .memory_cache import get_cached_config, invalidate_config_cache
+
+# Lazy imports for memory-intensive modules
+_scraper = None
+_downloader = None
+_poster = None
+
+def get_scraper():
+    global _scraper
+    if _scraper is None:
+        from .scraper import TikTokScraper
+        _scraper = TikTokScraper(database)
+    return _scraper
+
+def get_downloader():
+    global _downloader
+    if _downloader is None:
+        from .downloader import VideoDownloader
+        download_path = os.getenv('DOWNLOAD_PATH', 'videos')
+        _downloader = VideoDownloader(database, download_path)
+    return _downloader
+
+def get_poster():
+    global _poster
+    if _poster is None:
+        from .poster import FacebookPoster
+        page_id, access_token = get_facebook_credentials()
+        if page_id and access_token:
+            _poster = FacebookPoster(database, page_id, access_token)
+    return _poster
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -98,20 +124,28 @@ class ConfigUpdate(BaseModel):
 
 # Helper functions
 def get_config():
-    """Get system configuration"""
+    """Get system configuration (cached)"""
+    return get_cached_config()
+
+def update_config(updates: Dict[str, Any]):
+    """Update configuration and invalidate cache"""
     config_path = os.getenv('CONFIG_PATH', 'config/config.json')
     try:
-        with open(config_path, 'r') as f:
-            return json.load(f)
-    except:
-        return {
-            "MIN_POSTS_PER_DAY": 10,
-            "MAX_POSTS_PER_DAY": 15,
-            "MIN_SCRAPE_INTERVAL": 20,
-            "MAX_SCRAPE_INTERVAL": 60,
-            "MIN_POST_INTERVAL": 30,
-            "MAX_POST_INTERVAL": 90
-        }
+        # Read existing config
+        config = get_config()
+        config.update(updates)
+        
+        # Write updated config
+        with open(config_path, 'w') as f:
+            json.dump(config, f, indent=2)
+        
+        # Invalidate cache
+        invalidate_config_cache()
+        
+        return True
+    except Exception as e:
+        database.log_error('api', f'Failed to update config: {str(e)}')
+        return False
 
 def get_facebook_credentials():
     """Get Facebook credentials from env vars, falling back to config.json"""
@@ -120,8 +154,6 @@ def get_facebook_credentials():
     access_token = os.getenv('FACEBOOK_ACCESS_TOKEN') or config.get('FACEBOOK_ACCESS_TOKEN')
     return page_id, access_token
 
-def update_config(config_updates: Dict):
-    """Update system configuration"""
     config_path = os.getenv('CONFIG_PATH', 'config/config.json')
     try:
         config = get_config()
@@ -417,25 +449,21 @@ async def post_single_video(tiktok_id: str):
 # Task Management
 @app.post("/tasks/scrape-keyword/{keyword}")
 async def scrape_keyword(keyword: str, background_tasks: BackgroundTasks):
-    """Start scraping task for a single keyword"""
+    """Scrape videos for a single keyword (direct, no worker queue)"""
     try:
-        if not scraper_queue:
-            raise HTTPException(status_code=503, detail="Redis/RQ not available")
+        from .scraper import TikTokScraper
+        scraper = TikTokScraper(database)
+        results = scraper.scrape_videos_by_keyword(keyword, count=50)
         
-        job = scraper_queue.enqueue(
-            scrape_keyword_task,
-            keyword=keyword,
-            database_path=os.getenv('DATABASE_PATH', 'app/database.db')
-        )
-        
-        database.log_info('api', f'Queued scraping task for keyword: {keyword}')
+        database.log_info('api', f'Scraped {len(results)} videos for keyword: {keyword}')
         
         return {
             "success": True,
-            "job_id": job.id,
-            "message": f"Scraping task queued for keyword: {keyword}"
+            "message": f"Scraped {len(results)} videos for keyword: {keyword}",
+            "videos_found": len(results)
         }
     except Exception as e:
+        database.log_error('api', f'Failed to scrape {keyword}: {str(e)}')
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/tasks/scrape-all")
@@ -472,26 +500,27 @@ async def unlimited_scraping():
 
 @app.post("/tasks/download-pending")
 async def download_pending_videos(background_tasks: BackgroundTasks, limit: int = Query(default=50, le=100)):
-    """Start download task for pending videos"""
+    """Download pending videos (direct, no worker queue)"""
     try:
-        if not downloader_queue:
-            raise HTTPException(status_code=503, detail="Redis/RQ not available")
+        from .downloader import VideoDownloader
+        download_path = os.getenv('DOWNLOAD_PATH', 'videos')
+        downloader = VideoDownloader(database, download_path)
         
-        job = downloader_queue.enqueue(
-            download_pending_videos_task,
-            database_path=os.getenv('DATABASE_PATH', 'app/database.db'),
-            download_path=os.getenv('DOWNLOAD_PATH', '/videos'),
-            limit=limit
-        )
+        # Download pending videos directly
+        result = downloader.download_pending_videos(limit)
+        downloaded = result.get('downloaded', 0)
+        failed = result.get('failed', 0)
         
-        database.log_info('api', f'Queued download task for {limit} pending videos')
+        database.log_info('api', f'Downloaded {downloaded} videos, {failed} failed')
         
         return {
             "success": True,
-            "job_id": job.id,
-            "message": f"Download task queued for {limit} pending videos"
+            "message": f"Downloaded {downloaded} videos, {failed} failed",
+            "downloaded": downloaded,
+            "failed": failed
         }
     except Exception as e:
+        database.log_error('api', f'Failed to download videos: {str(e)}')
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/tasks/post-pending")
